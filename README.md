@@ -286,3 +286,7 @@ Il port Rust (`rust/src/`) ha gli stessi moduli, più `http.rs` e `util.rs`; i t
 
 Codice Python in `src/llm_router/`: `config.py` (impostazioni), `catalog.py` (scoperta e fusione dei modelli),
 `normalize.py` (nomi), `scores.py` (punteggi), `router.py` (scelta e fallback), `health.py` (pause), `app.py` (HTTP).
+
+## Licenza
+
+MIT, vedi [LICENSE](LICENSE).
