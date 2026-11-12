@@ -239,6 +239,13 @@ impl Router {
 
     // ---- choosing -------------------------------------------------------
 
+    /// Models with no score and no manual rating, in a stable order: the last resort of every tier.
+    fn unrated_tail(&self) -> Vec<Arc<Model>> {
+        let mut found = self.catalog.unrated();
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        found
+    }
+
     fn chain(&self, tier: &str, with_fallback: bool) -> Vec<Arc<Model>> {
         let mut tiers = vec![tier.to_string()];
         if with_fallback
@@ -283,6 +290,10 @@ impl Router {
             let sticky = self.sticky(session);
             // A conversation keeps the model that answered it last time, while it is usable.
             models.sort_by_key(|m| Some(&m.name) != sticky.as_ref());
+            if fallback != "none" {
+                // Last resort: models with no score rather than an error. Never ahead of a rated one.
+                models.extend(self.unrated_tail());
+            }
             for m in models {
                 for e in &m.endpoints {
                     pairs.push((m.clone(), e.clone()));
@@ -303,13 +314,17 @@ impl Router {
                 }
                 None => pairs.extend(model.endpoints.iter().map(|e| (model.clone(), e.clone()))),
             }
-            if fallback == "tier"
-                && let Some(tier) = &model.tier {
-                    // An unrated model has no tier to fall back through.
+            if fallback == "tier" {
+                // An unrated model has no tier to fall back through, only the other unrated ones.
+                if let Some(tier) = &model.tier {
                     for m in self.chain(tier, true).into_iter().filter(|m| m.name != model.name) {
                         pairs.extend(m.endpoints.iter().map(|e| (m.clone(), e.clone())));
                     }
                 }
+                for m in self.unrated_tail().into_iter().filter(|m| m.name != model.name) {
+                    pairs.extend(m.endpoints.iter().map(|e| (m.clone(), e.clone())));
+                }
+            }
         }
 
         let mut plan = Plan::default();

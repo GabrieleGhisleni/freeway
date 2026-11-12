@@ -1,7 +1,7 @@
 //! Intelligence scores from Artificial Analysis, cached on disk.
 //!
 //! A model with no score is *unrated*: it is never picked by a tier, only by name.
-//! The cache file has the same shape as the Python version's (`data/scores.json`).
+//! The cache file is `data/scores.json`.
 
 use crate::config::ScoresConfig;
 use crate::normalize;

@@ -49,9 +49,19 @@ pub fn parse_tokens(raw: &str) -> Vec<String> {
 
 /// Builds the app and loads the catalog once before returning.
 pub async fn build_app(settings: Arc<Settings>, tokens: Vec<String>, client: reqwest::Client) -> (axum::Router, Arc<Catalog>) {
+    let (app, catalog, _) = build_app_with_health(settings, tokens, client).await;
+    (app, catalog)
+}
+
+/// Same as `build_app`, also returning the health book so the caller can flush it on shutdown.
+pub async fn build_app_with_health(
+    settings: Arc<Settings>,
+    tokens: Vec<String>,
+    client: reqwest::Client,
+) -> (axum::Router, Arc<Catalog>, Arc<Health>) {
     let scores = settings.scores.clone().map(|cfg| Arc::new(ScoreBook::new(cfg, client.clone())));
     let catalog = Arc::new(Catalog::new(settings.clone(), client.clone(), scores));
-    let health = Arc::new(Health::new());
+    let health = Arc::new(settings.health_file.as_deref().map_or_else(Health::new, Health::with_file));
     let router = Arc::new(Router::new(settings.clone(), catalog.clone(), health.clone(), client));
     if tokens.is_empty() {
         tracing::warn!("ROUTER_TOKENS is not set: the server is open to anyone who can reach it");
@@ -60,7 +70,7 @@ pub async fn build_app(settings: Arc<Settings>, tokens: Vec<String>, client: req
     }
     catalog.refresh().await;
 
-    let state = AppState { settings, catalog: catalog.clone(), health, router, tokens: Arc::new(tokens) };
+    let state = AppState { settings, catalog: catalog.clone(), health: health.clone(), router, tokens: Arc::new(tokens) };
     let app = axum::Router::new()
         .route("/health", get(health_check))
         .route("/v1/models", get(list_models))
@@ -70,10 +80,11 @@ pub async fn build_app(settings: Arc<Settings>, tokens: Vec<String>, client: req
         .route("/v1/systemone", post(systemone))
         .route("/api/alpha/decisions", post(systemone))
         .route("/admin/status", get(status))
+        .route("/admin/info", get(info))
         .route("/admin/refresh", post(refresh))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);
-    (app, catalog)
+    (app, catalog, health)
 }
 
 /// Re-reads the provider lists every `minutes` minutes, forever.
@@ -214,6 +225,43 @@ async fn status(State(st): State<AppState>) -> Json<Value> {
         "unrated": st.catalog.unrated().iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
         "tiers": tiers,
     }))
+}
+
+/// `GET /admin/info`: who is paused and until when, plus ok/failed counts per model and per provider.
+async fn info(State(st): State<AppState>) -> Json<Value> {
+    let rate = |ok: u64, failed: u64| (ok + failed > 0).then(|| ((ok as f64 / (ok + failed) as f64) * 1000.0).round() / 1000.0);
+    let mut models: Vec<Value> = Vec::new();
+    let mut providers: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+    for m in st.catalog.all_models() {
+        for e in &m.endpoints {
+            let s = st.health.stat(&e.provider, &e.raw_id).unwrap_or_default();
+            let p = providers.entry(e.provider.clone()).or_default();
+            p.0 += s.ok;
+            p.1 += s.failed;
+            models.push(json!({
+                "model": m.name,
+                "tier": m.tier,
+                "score": m.score,
+                "endpoint": e.reference(),
+                "ok": s.ok,
+                "failed": s.failed,
+                "success_rate": rate(s.ok, s.failed),
+                "failures_by_kind": s.by_kind,
+                "last_ok_at": s.last_ok_at,
+                "last_failed_at": s.last_failed_at,
+                "last_error": s.last_error,
+                "last_latency": s.last_latency,
+                "cooldown_seconds": st.health.cooldown(&e.provider, &e.raw_id).round() as i64,
+            }));
+        }
+    }
+    // Most used first, then by name.
+    models.sort_by_key(|r| (std::cmp::Reverse(r["ok"].as_u64().unwrap_or(0) + r["failed"].as_u64().unwrap_or(0)), r["endpoint"].as_str().unwrap_or("").to_string()));
+    let providers: Map<String, Value> = providers
+        .into_iter()
+        .map(|(k, (ok, failed))| (k, json!({ "ok": ok, "failed": failed, "success_rate": rate(ok, failed) })))
+        .collect();
+    Json(json!({ "now": now(), "paused": st.health.pauses(), "providers": providers, "models": models }))
 }
 
 async fn refresh(State(st): State<AppState>) -> Json<Value> {

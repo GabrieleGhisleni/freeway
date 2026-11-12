@@ -113,6 +113,7 @@ async fn start(fake: Fake, models_yaml: &str, tokens: &[&str]) -> Harness {
     let port = serve_fake(fake.clone()).await;
     let yaml = format!(
         "scores: null
+health_file: null
 tiers:
   - {{ name: smart, min_score: 80, fallback: [fast] }}
   - {{ name: fast, min_score: 0 }}
@@ -466,12 +467,12 @@ async fn failed_refresh_keeps_cached_scores() {
 }
 
 #[tokio::test]
-async fn the_python_score_cache_is_readable() {
-    // Same file format as the Python version, so the two can share data/scores.json.
+async fn the_score_cache_is_readable() {
+    // Reads a cache file written earlier (data/scores.json).
     let py = format!("{}/../data/scores.json", env!("CARGO_MANIFEST_DIR"));
     if std::path::Path::new(&py).exists() {
         let book = ScoreBook::new(ScoresConfig { cache_file: py, ..Default::default() }, build_client(10.0));
-        assert!(book.entries() > 10, "expected the Python cache to load");
+        assert!(book.entries() > 10, "expected the cache to load");
     }
 }
 
@@ -612,6 +613,7 @@ async fn probe_keeps_only_listed_models_that_answer_a_chat() {
     let port = serve_fake(fake.clone()).await;
     let yaml = format!(
         "scores: null
+health_file: null
 tiers: [{{ name: fast, min_score: 0 }}]
 providers:
   - {{ name: a, base_url: 'http://127.0.0.1:{port}/a/v1', api_key_env: KEY_A, probe: true }}
@@ -635,4 +637,43 @@ providers:
     catalog.refresh().await;
     assert_eq!(fake.calls().len() - before, 0);
     assert_eq!(listed(h.get("/v1/models", Some("secret")).await), ["good"]);
+}
+
+#[tokio::test]
+async fn info_reports_pauses_and_counts() {
+    let fake = Fake::new(&[("a", &["big-500b"]), ("b", &["big-500b"])]).on("a", "big-500b", limited("45"));
+    let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
+    assert_eq!(h.chat("big-500b").await.status, 200); // a limits, b answers
+    let info = h.get("/admin/info", Some("secret")).await.json();
+    let paused = info["paused"].as_array().unwrap();
+    assert_eq!(paused.len(), 1);
+    assert_eq!((paused[0]["provider"].as_str(), paused[0]["kind"].as_str()), (Some("a"), Some("rate_limit")));
+    let secs = paused[0]["remaining_seconds"].as_i64().unwrap();
+    assert!((40..=45).contains(&secs), "{secs}");
+    let row = |ep: &str| info["models"].as_array().unwrap().iter().find(|r| r["endpoint"] == ep).unwrap().clone();
+    assert_eq!(row("a/big-500b")["failures_by_kind"]["rate_limit"], 1);
+    assert_eq!((row("b/big-500b")["ok"].as_u64(), row("b/big-500b")["success_rate"].as_f64()), (Some(1), Some(1.0)));
+    assert_eq!(info["providers"]["a"]["failed"], 1);
+}
+
+#[tokio::test]
+async fn unrated_models_are_the_last_resort_of_a_tier() {
+    // `mystery` has no score: it answers only when every rated endpoint is paused or failing.
+    let fake = Fake::new(&[("a", &["small-1b", "mystery"]), ("b", &[])]).on("a", "small-1b", limited("60"));
+    let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
+    let r = h.chat("fast").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("x-router-model"), "mystery");
+    assert_eq!(r.header("x-router-tier"), "unrated");
+
+    // With a rated model available, the unrated one is never picked.
+    let fake = Fake::new(&[("a", &["small-1b", "mystery"]), ("b", &[])]);
+    let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
+    assert_eq!(h.chat("fast").await.header("x-router-model"), "small-1b");
+
+    // fallback: none stays inside the tier.
+    let fake = Fake::new(&[("a", &["small-1b", "mystery"]), ("b", &[])]).on("a", "small-1b", limited("60"));
+    let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
+    let r = h.chat_with(json!({ "model": "fast", "messages": [{ "role": "user", "content": "hi" }] }), &[("x-router-fallback", "none")]).await;
+    assert_eq!(r.status, 503);
 }

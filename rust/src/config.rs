@@ -141,6 +141,9 @@ fn d_attempts() -> usize {
 fn d_session() -> f64 {
     120.0
 }
+fn d_health_file() -> Option<String> {
+    Some("data/health.json".into())
+}
 fn d_scores() -> Option<ScoresConfig> {
     Some(ScoresConfig::default())
 }
@@ -170,6 +173,9 @@ pub struct Settings {
     pub session_ttl_minutes: f64,
     #[serde(default = "d_scores")]
     pub scores: Option<ScoresConfig>,
+    /// Cooldowns and counters survive restarts here; null = memory only.
+    #[serde(default = "d_health_file")]
+    pub health_file: Option<String>,
     pub tiers: Vec<TierConfig>,
     pub providers: Vec<ProviderConfig>,
     /// Canonical name -> other names that must be treated as the same model.

@@ -5,6 +5,7 @@ host: 127.0.0.1
 port: 4100
 refresh_minutes: 30        # how often provider model lists are re-read
 first_token_timeout: 30    # seconds to wait for the first streamed chunk before trying the next provider
+health_file: data/health.json  # pauses (429 + Retry-After) and ok/failed counters survive restarts; null = memory only
 max_attempts: 8            # endpoints tried per request before giving up
 
 # Where model scores come from: the Artificial Analysis Intelligence Index

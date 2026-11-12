@@ -47,7 +47,7 @@ Esiste solo la chat: niente embeddings, niente formato Anthropic.
 | `smart`, `balanced`, `fast` | **Tier**: prova i modelli migliori del tier, poi quelli dei tier di riserva |
 | `gemini-3.8-flash` | **Sempre lo stesso modello**, su qualunque provider lo abbia. Non scala ad altri modelli |
 | `openrouter/nvidia/nemotron-3.5-super-vl:free` | **Un solo endpoint** di un solo provider (`<provider>/<id del provider>`) |
-| `fake` | Risposta **inventata in locale**, nessun provider contattato (solo Rust, vedi [README](../README.md#modello-fake-solo-rust)) |
+| `fake` | Risposta **inventata in locale**, nessun provider contattato (vedi [README](../README.md#modello-fake)) |
 
 I nomi validi si leggono con `GET /v1/models`.
 
@@ -63,7 +63,7 @@ I nomi validi si leggono con `GET /v1/models`.
 ### Header della risposta: chi ha risposto
 
 `x-router-model`, `x-router-tier` (o `unrated`), `x-router-provider`, `x-router-upstream-model`, `x-router-attempts` (tentativi, compreso quello riuscito).
-Guardali: un tier può **declassare** in silenzio (`smart` può rispondere con un modello `balanced`). Per non declassare usa `x-router-fallback: none`.
+Guardali: un tier può **declassare** in silenzio (`smart` può rispondere con un modello `balanced`, o come ultima risorsa con uno `unrated`). Per non declassare usa `x-router-fallback: none`.
 
 ### Ragionamento (reasoning)
 
@@ -98,10 +98,13 @@ Tutti richiedono il token, compreso `/health`.
 | Endpoint | Cosa fa |
 |---|---|
 | `GET /v1/models` | tier e modelli con tier, punteggio e provider |
-| `GET /v1/models/{id}` | un solo tier o modello (anche `<provider>/<id>`); 404 `model_not_found`. Solo Rust |
+| `GET /v1/models/{id}` | un solo tier o modello (anche `<provider>/<id>`); 404 `model_not_found`. |
 | `GET /admin/status` (*) | provider attivi/saltati, punteggi, modelli per tier con pause ed errori, elenco `unrated` |
+| `GET /admin/info` (*) | pause attive (chi, perché, fino a quando), riuscite/fallite per modello e per provider, errori per tipo. |
 | `POST /admin/refresh` (*) | rilegge subito gli elenchi dei provider |
 | `GET /health` | `{"status":"ok"}` |
-| `POST /v1/systemone` | Decision API, solo Rust (vedi [README](../README.md#decision-api-solo-rust)) |
+| `POST /v1/systemone` | Decision API (vedi [README](../README.md#decision-api)) |
 
 (*) Da internet rispondono 404: il tunnel li blocca. Si usano dal Pi: `ssh rpi 'curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:4100/admin/status'`.
+
+Le pause (es. un 429 con `Retry-After`) e i contatori sono salvati in `data/health.json` (`health_file` in `config.yaml`, `null` = solo memoria): un riavvio non fa riprovare subito chi è ancora bloccato.

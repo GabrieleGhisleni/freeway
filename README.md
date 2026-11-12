@@ -5,8 +5,7 @@ Server locale **OpenAI-compatibile** che smista le richieste tra i provider LLM 
 Scegli un **livello di intelligenza** (`smart`, `balanced`, `fast`) oppure un **modello preciso**:
 il router trova un provider che lo serva davvero.
 
-Due versioni equivalenti, stesso `config.yaml` e stesso `.env`: **Python** (`src/`) e **Rust** (`rust/`, un solo binario, senza Python).
-La Decision API, `GET /v1/models/{id}` e il modello `fake` esistono solo nella versione Rust.
+Un solo binario Rust (`rust/`), configurato da `config.yaml` e `.env`. La vecchia versione Python è stata rimossa: se mai tornasse, deve restare *feature parity* con Rust.
 
 **Documentazione**
 
@@ -22,17 +21,16 @@ Serve prima `.env` con almeno un token e una chiave di provider (tabella sotto).
 
 ```bash
 cp .env.example .env      # poi compilalo
-uv sync && uv run freeway                                  # Python: http://127.0.0.1:4100
-cd rust && cargo build --release && cd .. && ./rust/target/release/freeway   # Rust
+cd rust && cargo build --release && cd .. && ./rust/target/release/freeway   # http://127.0.0.1:4100
 ```
 
-Opzioni (uguali nelle due versioni): `--port 4200 --host 127.0.0.1 --config altro.yaml`.
+Opzioni: `--port 4200 --host 127.0.0.1 --config altro.yaml`.
 `config.yaml` e `.env` si cercano nella cartella corrente (o `$ROUTER_CONFIG`): avvia dalla cartella del progetto.
 Dopo ogni modifica a `config.yaml` o `.env` **riavvia**.
 
 | Variabile in `.env` | A cosa serve | Dove si ottiene |
 |---|---|---|
-| `ROUTER_TOKENS` | password per chi chiama il router; **una o più, separate da virgola** | `python3 -c "import secrets; print(secrets.token_urlsafe(32))"` per ognuna |
+| `ROUTER_TOKENS` | password per chi chiama il router; **una o più, separate da virgola** | `openssl rand -base64 32` per ognuna |
 | `OPENROUTER_API_KEY` | provider OpenRouter | openrouter.ai |
 | `OPENCODE_API_KEY` | provider OpenCode Zen | opencode.ai |
 | `GEMINI_API_KEY` | provider Google AI Studio | aistudio.google.com |
@@ -88,7 +86,9 @@ Dentro il tier si prova prima il punteggio più alto.
 
 ### 4. Modelli senza punteggio
 Il piano gratuito di Artificial Analysis non pubblica l'indice di molti modelli. Un modello senza punteggio è **non valutato**:
-nessun tier lo sceglie, ma si può chiamare per nome. `GET /admin/status` elenca gli `unrated`.
+nessun tier lo sceglie *finché c'è un modello valutato disponibile*; si può sempre chiamare per nome.
+Quando tutti gli endpoint valutati sono in pausa o falliscono, il router prova i non valutati (in ordine alfabetico) **prima di rispondere con un errore**; con `x-router-fallback: none` questo non succede.
+`GET /admin/status` elenca gli `unrated`; la risposta ha `x-router-tier: unrated`.
 Per metterli nei tier dai un voto in `models:` (stessa scala). I voti in `config.yaml` marcati *ESTIMATES* sono stime, non misure.
 
 ### 5. Quando un provider non risponde
@@ -105,14 +105,14 @@ Anche errori nascosti in una risposta 200 vengono riconosciuti. In streaming il 
 dopo il primo byte non può più cambiare provider. Si provano al massimo 8 endpoint per richiesta.
 Le pause sono **in memoria**: se riavvii il server le dimentica.
 
-## Modello `fake` (solo Rust)
+## Modello `fake`
 
 `model: "fake"` risponde con testo **inventato in locale**: nessun provider, nessuna quota consumata. Serve per provare un client
 (streaming, `usage`, header, timeout) senza chiavi né 429. Il testo dipende solo dall'ultimo messaggio utente (stesso messaggio, stessa risposta),
 `max_tokens` lo accorcia con `finish_reason: "length"`. Non fa parte di nessun tier, quindi un fallback non lo sceglie mai;
 si riconosce da `system_fingerprint: "fake"` e da `x-router-provider: fake`. Richiede comunque il token.
 
-## Decision API (solo Rust)
+## Decision API
 
 `POST /v1/systemone` (alias `POST /api/alpha/decisions`, il nome usato da OpenRouter) risponde a **domande tipizzate** su uno `state`,
 nello stesso formato dei modelli «System One» come Jev di TypeSafe: invece di testo restituisce probabilità.
@@ -175,12 +175,10 @@ Un tier si può anche creare a mano: con `min_score: 101` nessun modello ci arri
 ## Sviluppo
 
 ```bash
-uv run pytest            # Python, provider finti, senza rete
-cd rust && cargo test    # Rust: unit test e integrazione (rust/tests/routing.rs)
+cd rust && cargo test    # unit test e integrazione con provider finti (rust/tests/routing.rs), senza rete
 ```
 
-Python in `src/freeway/`: `config.py`, `catalog.py` (scoperta e fusione dei modelli), `normalize.py`, `scores.py`, `router.py` (scelta e fallback), `health.py` (pause), `app.py` (HTTP).
-Rust in `rust/src/`: gli stessi moduli, più `http.rs`, `util.rs`, `systemone.rs` (Decision API) e `fake.rs`.
+Codice in `rust/src/`: `config.rs`, `catalog.rs` (scoperta e fusione dei modelli), `normalize.rs`, `scores.rs`, `router.rs` (scelta e fallback), `health.rs` (pause e contatori, salvati in `data/health.json`), `app.rs` (HTTP), `http.rs`, `util.rs`, `systemone.rs` (Decision API) e `fake.rs`.
 
 ---
 
