@@ -116,6 +116,22 @@ ssh rpi 'cat freeway/VERSION; systemctl is-active freeway cloudflared'
 ssh rpi 'curl -s -H "Authorization: Bearer $(grep ^ROUTER_TOKENS freeway/.env | cut -d= -f2 | cut -d, -f1)" http://127.0.0.1:4100/admin/status'
 ```
 
+**Log.** `freeway` e `cloudflared` scrivono su stdout e li raccoglie il journal di systemd. Raspberry Pi OS lo tiene in RAM (`Storage=volatile`): si perde a ogni riavvio. Per tenerlo su disco, con limiti, sul Pi:
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/90-freeway.conf <<'EOF'
+[Journal]
+Storage=persistent
+SystemMaxUse=200M
+SystemKeepFree=2G
+MaxRetentionSec=1month
+EOF
+sudo systemctl restart systemd-journald && sudo journalctl --flush
+```
+
+Il file non supera i 200 MB, lascia sempre 2 GB liberi e butta le righe più vecchie di un mese. Per vedere quali modelli falliscono: `ssh rpi "journalctl -u freeway --since '-1d' | grep ' failed:'"` (ogni riga dice modello, errore, stato HTTP e pausa); le richieste riuscite hanno `ok in ... after N failed attempt(s)`.
+
 **Sicurezza.** Il token è l'unica difesa: chi lo ha consuma le quote gratuite dei provider. Usa token lunghi e casuali (uno per app) e, se uno trapela, toglilo con `deploy/env.sh edit`. Su internet i prompt passano da Cloudflare e, con i modelli gratuiti, dal provider che li serve: niente dati sensibili.
 
 **Annullare tutto.** `sudo systemctl disable --now cloudflared` chiude subito l'accesso da internet; per cancellare il tunnel: `cloudflared tunnel delete freeway` e il record DNS dalla dashboard Cloudflare.
