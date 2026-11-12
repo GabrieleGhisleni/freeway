@@ -1,0 +1,10 @@
+$kind: http-request
+description: Risponde {"status":"ok"} se il token è valido.
+url: "{{baseUrl}}/health"
+method: GET
+auth:
+  type: bearer
+  credentials:
+    token: "{{token}}"
+settings: {}
+order: 1000

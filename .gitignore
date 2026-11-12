@@ -2,3 +2,5 @@
 data/
 rust/target/
 .idea/
+# holds the real token: never commit
+postman/environments/

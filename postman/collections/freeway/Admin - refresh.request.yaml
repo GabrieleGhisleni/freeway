@@ -1,0 +1,9 @@
+$kind: http-request
+description: "Solo da dentro il Pi: dal tunnel pubblico /admin/* risponde 404. Apri un tunnel (ssh -L 4100:127.0.0.1:4100 rpi) e usa adminUrl=http://127.0.0.1:4100. Rilegge subito gli elenchi dei provider."
+url: "{{adminUrl}}/admin/refresh"
+method: POST
+auth:
+  type: bearer
+  credentials:
+    token: "{{token}}"
+order: 6200

@@ -1,0 +1,14 @@
+$kind: http-request
+description: Tier fast, risposta in streaming, ragionamento spento con reasoning_effort none.
+url: "{{baseUrl}}/v1/chat/completions"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: '{"model":"fast","stream":true,"reasoning_effort":"none","messages":[{"role":"user","content":"Conta da 1 a 5."}]}'
+auth:
+  type: bearer
+  credentials:
+    token: "{{token}}"
+order: 5000

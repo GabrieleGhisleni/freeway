@@ -1,0 +1,14 @@
+$kind: http-request
+description: "Risposta inventata in locale: non consuma quote dei provider."
+url: "{{baseUrl}}/v1/chat/completions"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: '{"model":"fake","messages":[{"role":"user","content":"Ciao!"}]}'
+auth:
+  type: bearer
+  credentials:
+    token: "{{token}}"
+order: 3000

@@ -1,0 +1,9 @@
+workspace:
+  id: 99db339f-4924-4b2d-8117-6d397e7360df
+
+# Each entry here maps a local resource to one or more corresponding objects in Postman Cloud
+cloudResources:
+  collections:
+    ../postman/collections/freeway: 14835029-a95dcf55-08d1-481d-98b9-7e32a1e59a79
+  environments:
+    ../postman/environments/freeway.environment.yaml: 14835029-af38b85e-d440-49dd-8acd-1418f9eaf732

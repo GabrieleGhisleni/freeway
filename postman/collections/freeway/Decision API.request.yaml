@@ -1,0 +1,14 @@
+$kind: http-request
+description: "Domande tipizzate (noul, choice, score) su uno state: risponde con probabilità. Alias: /api/alpha/decisions."
+url: "{{baseUrl}}/v1/systemone"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: "{\"model\": \"balanced\", \"state\": \"Mi avete addebitato due volte l'abbonamento. Rimborsatemi.\", \"questions\": {\"billing\": {\"type\": \"noul\", \"instructions\": \"Parla di fatturazione?\"}, \"anger\": {\"type\": \"score\", \"instructions\": \"Quanto è arrabbiato?\", \"criteria\": [\"calmo\", \"scocciato\", \"furioso\"]}}}"
+auth:
+  type: bearer
+  credentials:
+    token: "{{token}}"
+order: 5000

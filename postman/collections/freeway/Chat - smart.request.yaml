@@ -1,0 +1,14 @@
+$kind: http-request
+description: "Tier smart. Guarda gli header x-router-model e x-router-provider nella risposta. Header opzionali: x-router-fallback (auto|none|tier), x-router-session."
+url: "{{baseUrl}}/v1/chat/completions"
+method: POST
+headers:
+  Content-Type: application/json
+body:
+  type: json
+  content: '{"model":"smart","messages":[{"role":"user","content":"Spiegami in due frasi cos è un router di LLM."}]}'
+auth:
+  type: bearer
+  credentials:
+    token: "{{token}}"
+order: 4000

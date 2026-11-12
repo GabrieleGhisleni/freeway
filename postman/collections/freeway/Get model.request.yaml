@@ -1,0 +1,9 @@
+$kind: http-request
+description: "Un solo tier o modello (anche <provider>/<id>). 404 model_not_found se non esiste."
+url: "{{baseUrl}}/v1/models/smart"
+method: GET
+auth:
+  type: bearer
+  credentials:
+    token: "{{token}}"
+order: 2500

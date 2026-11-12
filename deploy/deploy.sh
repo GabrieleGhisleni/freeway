@@ -49,7 +49,7 @@ scp -q "$ROOT/config.yaml" "$HOST:$DIR/config.yaml"
 ssh "$HOST" "chmod 755 $DIR/freeway.new && mv $DIR/freeway.new $DIR/freeway && echo '$BRANCH@$COMMIT' > $DIR/VERSION && sudo systemctl restart freeway"
 
 # Any HTTP answer from localhost (401 without a token) means the server is up.
-ssh "$HOST" 'for i in $(seq 1 15); do
+ssh "$HOST" 'for i in $(seq 1 90); do
   code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:4100/health || true)
   [ "$code" = 401 ] || [ "$code" = 200 ] && { echo "freeway up (HTTP $code)"; exit 0; }
   sleep 1
