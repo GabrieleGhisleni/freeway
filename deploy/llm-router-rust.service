@@ -1,0 +1,33 @@
+# systemd unit for the Raspberry Pi (Rust binary). Build first: cd rust && cargo build --release
+# Install:  sudo cp deploy/llm-router.service /etc/systemd/system/
+#           sudo systemctl daemon-reload && sudo systemctl enable --now llm-router
+# Edit User and the two paths below if the project does not live in /home/pi/freeway.
+
+[Unit]
+Description=freeway (OpenAI-compatible router over free LLM providers)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/freeway
+# Keys and tokens are read from /home/pi/freeway/.env (loaded by the app itself).
+# 0.0.0.0 makes the server reachable from the local network: use it only behind
+# a firewall or a VPN (Tailscale), or change it to 127.0.0.1 when a reverse proxy is in front.
+ExecStart=/home/pi/freeway/rust/target/release/llm-router --host 0.0.0.0 --port 4100
+Restart=always
+RestartSec=5
+
+# Memory cap (not measured, generous for a single static binary); it keeps a runaway from taking the whole board down.
+MemoryMax=150M
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/pi/freeway/data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,40 @@
+[package]
+name = "llm-router"
+version = "0.1.0"
+edition = "2024"
+description = "Local OpenAI-compatible server that routes requests across free LLM providers by intelligence tier"
+
+[lib]
+name = "llm_router"
+path = "src/lib.rs"
+
+[[bin]]
+name = "llm-router"
+path = "src/main.rs"
+
+[dependencies]
+async-stream = "0.3.6"
+axum = "0.8.9"
+bytes = "1.12.1"
+dotenvy = "0.15.7"
+futures-util = "0.3.34"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+serde_yaml = "0.9.34"
+subtle = "2.6.1"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+
+[dev-dependencies]
+http-body-util = "0.1.5"
+tower = { version = "0.5.3", features = ["util"] }
