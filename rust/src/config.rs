@@ -14,6 +14,8 @@ pub enum Kind {
     /// Plain `GET {base_url}/models`; every listed model counts as free.
     #[default]
     Openai,
+    /// Z.ai pricing page (`models_url`, Markdown); keeps models whose prices are all "Free".
+    Zai,
 }
 
 fn d_priority() -> i64 {
@@ -42,6 +44,10 @@ pub struct ProviderConfig {
     /// Static list; skips discovery.
     #[serde(default)]
     pub models: Vec<String>,
+    /// For listings that include dead or non-chat models (NVIDIA lists 83, about 10 answer):
+    /// send each listed model a 1-token chat and keep only those that answer.
+    #[serde(default)]
+    pub probe: bool,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     #[serde(default = "d_true")]

@@ -72,6 +72,32 @@ providers:
       - "gemini-2.5-*"
       - "*-latest"
 
+  - name: nvidia
+    kind: openai
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_API_KEY    # key from build.nvidia.com (free, about 40 requests/minute)
+    priority: 10
+    # The listing has 80+ ids and says nothing about which work: most answer 404,
+    # some hang, some are not chat models. `probe` keeps those that answer a chat.
+    probe: true
+    # Answer a chat request, but are not chat models: *guard* is already filtered out.
+    exclude: ["*parse*", "*calibration*", "*translate*", "*reward*"]
+
+  - name: groq
+    kind: openai
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY      # key from console.groq.com
+    priority: 10
+    # The listing is small and all free; whisper, *guard* and embeddings are already
+    # filtered out. Left: text-to-speech and the safety classifier.
+    exclude: ["*orpheus*", "*safeguard*"]
+
+  - name: zai
+    kind: zai                     # free models come from the public pricing page, not from /models
+    base_url: https://api.z.ai/api/paas/v4
+    api_key_env: ZAI_API_KEY       # key from z.ai
+    priority: 10
+
 
 # Names that must be treated as one model when automatic matching misses them.
 aliases: {}

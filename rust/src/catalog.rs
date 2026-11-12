@@ -7,8 +7,8 @@ use crate::util::fnmatch;
 use futures_util::future::join_all;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 /// Listed by generic providers next to chat models, but not chat models.
 const NON_CHAT: &[&str] = &["*whisper*", "*tts*", "*guard*", "*embed*", "*rerank*", "*moderation*", "*speech*"];
@@ -146,6 +146,49 @@ pub fn parse_openai(p: &ProviderConfig, payload: &Value) -> Vec<Endpoint> {
     out
 }
 
+pub const ZAI_PRICING_URL: &str = "https://docs.z.ai/guides/overview/pricing.md";
+
+fn cells(line: &str) -> Vec<String> {
+    line.trim().trim_matches('|').split('|').map(|c| c.trim().replace(['\\', '*'], "")).collect()
+}
+
+/// Z.ai lists neither prices nor its free models in /models (the free `-flash` ones are
+/// missing and every listed one needs a balance), so read the public pricing page: a
+/// token-priced model is free when every price cell says "Free". "Limited-time Free" on a
+/// paid model is only its cache storage, so it does not count.
+pub fn parse_zai(p: &ProviderConfig, text: &str) -> Vec<Endpoint> {
+    let mut out = Vec::new();
+    let mut heading = String::new();
+    let mut priced = false; // inside a table whose columns are Model | Input | ...
+    for line in text.lines() {
+        let line = line.trim_start_matches([' ', '>']); // the cheaper models sit in a collapsed "Other Pricing" blockquote
+        if line.starts_with('#') {
+            heading = line.trim_start_matches('#').trim().to_lowercase();
+        }
+        if !line.trim_start().starts_with('|') {
+            priced = false;
+            continue;
+        }
+        let c = cells(line);
+        if c[0].eq_ignore_ascii_case("model") {
+            priced = c.len() > 2 && c[1].eq_ignore_ascii_case("input");
+        } else if priced && c.len() > 2 && c[1..].iter().all(|x| x.eq_ignore_ascii_case("free")) {
+            let raw_id = c[0].to_lowercase();
+            out.push(Endpoint {
+                provider: p.name.clone(),
+                keys: normalize::keys([Some(raw_id.as_str())]),
+                raw_id,
+                base_url: p.base_url.clone(),
+                priority: p.priority,
+                context: None,
+                tools: None,
+                vision: Some(heading.contains("vision")),
+            });
+        }
+    }
+    out
+}
+
 struct UnionFind {
     parent: HashMap<String, String>,
 }
@@ -267,7 +310,16 @@ pub struct Catalog {
     scores: Option<Arc<ScoreBook>>,
     state: RwLock<State>,
     refresh_lock: tokio::sync::Mutex<()>,
+    /// `probe: true` providers: (provider, model) -> (answers a chat, verdict valid until).
+    probes: Mutex<HashMap<(String, String), (bool, Instant)>>,
 }
+
+// `probe: true` providers. Few in parallel: free tiers allow about 40 requests a minute.
+const PROBE_PARALLEL: usize = 2;
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20); // a model that needs longer is too slow to be a fallback anyway
+const PROBE_OK_TTL: Duration = Duration::from_secs(24 * 3600);
+const PROBE_GONE_TTL: Duration = Duration::from_secs(6 * 3600);
+const PROBE_RETRY_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// What `/admin/status` reports about providers.
 pub struct ProviderStatus {
@@ -278,7 +330,14 @@ pub struct ProviderStatus {
 
 impl Catalog {
     pub fn new(settings: Arc<Settings>, client: reqwest::Client, scores: Option<Arc<ScoreBook>>) -> Self {
-        Self { settings, client, scores, state: RwLock::new(State::default()), refresh_lock: tokio::sync::Mutex::new(()) }
+        Self {
+            settings,
+            client,
+            scores,
+            state: RwLock::new(State::default()),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            probes: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn scores(&self) -> Option<&Arc<ScoreBook>> {
@@ -315,6 +374,17 @@ impl Catalog {
                     vision: None,
                 })
                 .collect()
+        } else if p.kind == Kind::Zai {
+            // A public docs page: the API key must not be sent to it.
+            let url = p.models_url.clone().unwrap_or_else(|| ZAI_PRICING_URL.to_string());
+            let resp = self.client.get(&url).timeout(Duration::from_secs(20)).send().await.map_err(|e| format!("request failed: {e}"))?.error_for_status().map_err(|e| e.to_string())?;
+            let text = resp.text().await.map_err(|e| format!("bad body: {e}"))?;
+            let eps = parse_zai(p, &text);
+            if eps.is_empty() {
+                // layout changed: keep the previous list instead of emptying it
+                return Err("no free model found on the pricing page".into());
+            }
+            eps
         } else {
             let url = p.models_url.clone().unwrap_or_else(|| format!("{}/models", p.base_url.trim_end_matches('/')));
             let mut req = self.client.get(&url).timeout(Duration::from_secs(20));
@@ -330,9 +400,65 @@ impl Catalog {
                 Kind::Openrouter => parse_openrouter(p, &payload),
                 Kind::Opencode => parse_opencode(p, &payload),
                 Kind::Openai => parse_openai(p, &payload),
+                Kind::Zai => unreachable!("handled above"),
             }
         };
-        Ok(eps.into_iter().filter(|e| !e.keys.is_empty() && wanted(p, &e.raw_id)).collect())
+        let eps: Vec<Endpoint> = eps.into_iter().filter(|e| !e.keys.is_empty() && wanted(p, &e.raw_id)).collect();
+        Ok(if p.probe { self.probe(p, eps).await } else { eps })
+    }
+
+    /// `Some(true)`: answers a chat. `Some(false)`: refuses it for good (404 gone, 400 not a
+    /// chat model). `None`: inconclusive (rate limit, 5xx, timeout, network), so ask again soon.
+    async fn probe_one(&self, p: &ProviderConfig, ep: &Endpoint) -> Option<bool> {
+        let body = serde_json::json!({ "model": ep.raw_id, "max_tokens": 1, "messages": [{ "role": "user", "content": "hi" }] });
+        let mut req = self.client.post(format!("{}/chat/completions", p.base_url.trim_end_matches('/'))).timeout(PROBE_TIMEOUT).json(&body);
+        if let Some(key) = p.api_key() {
+            req = req.bearer_auth(key);
+        }
+        for (k, v) in &p.headers {
+            req = req.header(k, v);
+        }
+        let status = req.send().await.ok()?.status();
+        if status.is_success() {
+            Some(true)
+        } else if matches!(status.as_u16(), 400 | 404 | 410 | 422) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// The remembered verdict for one model, or a fresh probe when there is none (or it expired).
+    async fn verdict(&self, p: &ProviderConfig, ep: &Endpoint, gate: &tokio::sync::Semaphore) -> bool {
+        let key = (p.name.clone(), ep.raw_id.clone());
+        let known = self.probes.lock().unwrap().get(&key).copied();
+        if let Some((ok, until)) = known {
+            if Instant::now() < until {
+                return ok;
+            }
+        }
+        let answer = {
+            let _permit = gate.acquire().await.expect("semaphore is never closed");
+            self.probe_one(p, ep).await
+        };
+        let (ok, ttl) = match answer {
+            Some(true) => (true, PROBE_OK_TTL),
+            Some(false) => (false, PROBE_GONE_TTL),
+            None => (known.map(|k| k.0).unwrap_or(false), PROBE_RETRY_TTL), // keep the old verdict
+        };
+        self.probes.lock().unwrap().insert(key, (ok, Instant::now() + ttl));
+        ok
+    }
+
+    /// Keep the models that answer a real chat request. Verdicts are remembered, so a refresh
+    /// only asks about models it has not seen (or whose verdict has expired).
+    async fn probe(&self, p: &ProviderConfig, eps: Vec<Endpoint>) -> Vec<Endpoint> {
+        let gate = tokio::sync::Semaphore::new(PROBE_PARALLEL);
+        let verdicts: Vec<bool> = join_all(eps.iter().map(|ep| self.verdict(p, ep, &gate))).await;
+        let total = eps.len();
+        let kept: Vec<Endpoint> = eps.into_iter().zip(verdicts).filter(|(_, ok)| *ok).map(|(e, _)| e).collect();
+        tracing::info!("probe {}: {} of {} listed models answer a chat", p.name, kept.len(), total);
+        kept
     }
 
     pub async fn refresh(&self) {
@@ -456,6 +582,48 @@ mod tests {
         let b = ScoreBook::new(ScoresConfig { cache_file: "/nonexistent/none.json".into(), ..Default::default() }, crate::http::build_client(10.0));
         b.set_table(rows.iter().map(|(k, v)| (normalize::family_key(k), *v)).collect());
         b
+    }
+
+    const ZAI_PRICING: &str = r"
+### Latest Models
+
+| Model | Input | Cached Input | Cached Input Storage | Output |
+| :- | :- | :- | :- | :- |
+| GLM-5.3 | \$1.4 | \$0.26 | Limited-time Free | \$4.4 |
+
+### Image Generation Models
+
+| Model | Price |
+| :- | :- |
+| GLM-Image | Free |
+
+> [accordion] Other Pricing
+>
+> ### Text Models
+>
+> | Model | Input | Cached Input | Cached Input Storage | Output |
+> | :- | :- | :- | :- | :- |
+> | GLM-4.7-FlashX | \$0.07 | \$0.01 | Limited-time Free | \$0.4 |
+> | GLM-4-32B-0414-128K | \$0.1 | - | - | \$0.1 |
+> | GLM-4.7-Flash | Free | Free | Free | Free |
+> | GLM-4.5-Flash | Free | Free | Free | Free |
+>
+> ### Vision Models
+>
+> | Model | Input | Cached Input | Cached Input Storage | Output |
+> | :- | :- | :- | :- | :- |
+> | GLM-OCR | \$0.03 | \\ | \\ | \$0.03 |
+> | GLM-4.5V | \$0.6 | \$0.11 | Limited-time Free | \$1.8 |
+> | GLM-4.6V-Flash | Free | Free | Free | Free |
+";
+
+    #[test]
+    fn zai_keeps_only_models_free_in_every_price_column() {
+        let eps = parse_zai(&provider("zai"), ZAI_PRICING);
+        let got: Vec<_> = eps.iter().map(|e| (e.raw_id.as_str(), e.vision)).collect();
+        // GLM-Image is a per-image price, not a chat model; "Limited-time Free" is only cache storage.
+        assert_eq!(got, [("glm-4.7-flash", Some(false)), ("glm-4.5-flash", Some(false)), ("glm-4.6v-flash", Some(true))]);
+        assert!(parse_zai(&provider("zai"), "<html>moved</html>").is_empty());
     }
 
     #[test]

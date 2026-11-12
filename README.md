@@ -36,6 +36,9 @@ Dopo ogni modifica a `config.yaml` o `.env` **riavvia**.
 | `OPENROUTER_API_KEY` | provider OpenRouter | openrouter.ai |
 | `OPENCODE_API_KEY` | provider OpenCode Zen | opencode.ai |
 | `GEMINI_API_KEY` | provider Google AI Studio | aistudio.google.com |
+| `NVIDIA_API_KEY` | provider NVIDIA (build.nvidia.com) | build.nvidia.com |
+| `GROQ_API_KEY` | provider Groq | console.groq.com |
+| `ZAI_API_KEY` | provider Z.ai (GLM) | z.ai |
 | `ARTIFICIAL_ANALYSIS_API_KEY` | punteggi di intelligenza dei modelli (senza, si usa l'ultima cache) | artificialanalysis.ai (gratis) |
 | `LOG_LEVEL` | `INFO` (default) o `DEBUG` | — |
 
@@ -145,7 +148,14 @@ possono impiegare decine di secondi: per decisioni rapide conviene un modello no
 
 - `tiers`: nomi, soglie e riserve dei livelli.
 - `providers`: per ognuno `base_url`, `api_key_env`, `priority`, `include`/`exclude` (glob sugli id del provider), `enabled`.
-  Per aggiungerne uno compatibile OpenAI (Groq, Cerebras, NVIDIA...) basta un blocco con `kind: openai`, `base_url` e `api_key_env`.
+  Per aggiungerne uno compatibile OpenAI (Cerebras, Mistral...) basta un blocco con `kind: openai`, `base_url` e `api_key_env`.
+  Come si scoprono i modelli gratis dipende dal `kind`: `openrouter` e `opencode` leggono il prezzo dall'elenco; `zai` legge la
+  [pagina prezzi](https://docs.z.ai/guides/overview/pricing) (il suo `/models` non dice nulla e non elenca i `-flash` gratuiti);
+  `openai` prende tutto ciò che l'elenco riporta.
+  Con `probe: true` Freeway manda a ogni modello elencato una chat da 1 token e tiene solo quelli che rispondono: serve quando l'elenco
+  è pieno di modelli morti o non-chat (NVIDIA ne elenca 64, ne rispondono circa 9). Le risposte si ricordano (sì 24 h, no 6 h, incerto 10 min),
+  quindi dopo l'avvio ogni refresh interroga solo i modelli nuovi. L'avvio è più lento di qualche decina di secondi.
+  I modelli si ricontrollano da soli ogni `refresh_minutes`, senza bisogno di deploy.
 - `models`: correzioni tue. `score` (ricalcola il tier), `tier` (forza), `disabled: true` (esclude).
   La chiave può essere qualunque nome con cui il modello compare in `/v1/models`.
 - `aliases`: nomi da trattare come lo stesso modello. `exclude`: glob sui nomi da escludere ovunque.

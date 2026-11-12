@@ -14,7 +14,8 @@ class ProviderConfig(BaseModel):
     #   openrouter - public listing, keeps only models priced at 0
     #   opencode   - OpenCode Zen listing, keeps only models priced at 0
     #   openai     - plain GET {base_url}/models; every listed model counts as free
-    kind: Literal["openrouter", "opencode", "openai"] = "openai"
+    #   zai        - Z.ai pricing page (models_url, Markdown); keeps models whose prices are all "Free"
+    kind: Literal["openrouter", "opencode", "openai", "zai"] = "openai"
     base_url: str
     models_url: str | None = None
     api_key_env: str
@@ -23,6 +24,9 @@ class ProviderConfig(BaseModel):
     include: list[str] = Field(default_factory=list)  # globs on the provider's model id
     exclude: list[str] = Field(default_factory=list)
     models: list[str] = Field(default_factory=list)  # static list; skips discovery
+    # For listings that include dead or non-chat models (NVIDIA lists 83, about 10 answer):
+    # send each listed model a 1-token chat and keep only those that answer.
+    probe: bool = False
     headers: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
 

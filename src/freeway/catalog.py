@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 
@@ -139,7 +140,54 @@ def parse_openai(p: ProviderConfig, payload: dict) -> list[Endpoint]:
     return out
 
 
-_PARSERS = {"openrouter": parse_openrouter, "opencode": parse_opencode, "openai": parse_openai}
+ZAI_PRICING_URL = "https://docs.z.ai/guides/overview/pricing.md"
+
+# `probe: true` providers. Few in parallel: free tiers allow about 40 requests a minute.
+PROBE_PARALLEL = 2
+PROBE_TIMEOUT = 20  # a model that needs longer is too slow to be a fallback anyway
+PROBE_OK_TTL = 24 * 3600
+PROBE_GONE_TTL = 6 * 3600
+PROBE_RETRY_TTL = 10 * 60
+
+
+def _cells(line: str) -> list[str]:
+    return [c.strip().replace("\\", "").replace("*", "") for c in line.strip().strip("|").split("|")]
+
+
+def parse_zai(p: ProviderConfig, text: str) -> list[Endpoint]:
+    """Z.ai lists neither prices nor its free models in /models (the free `-flash`
+    ones are missing and every listed one needs a balance), so read the public
+    pricing page: a token-priced model is free when every price cell says "Free".
+    "Limited-time Free" on a paid model is only its cache storage, so it does not count."""
+    out = []
+    heading = ""
+    priced = False  # inside a table whose columns are Model | Input | ...
+    for line in text.splitlines():
+        line = line.lstrip(" >")  # the cheaper models sit in a collapsed "Other Pricing" blockquote
+        if line.startswith("#"):
+            heading = line.lstrip("#").strip().lower()
+        if not line.lstrip().startswith("|"):
+            priced = False
+            continue
+        cells = _cells(line)
+        if cells[0].lower() == "model":
+            priced = len(cells) > 2 and cells[1].lower() == "input"
+        elif priced and len(cells) > 2 and all(c.lower() == "free" for c in cells[1:]):
+            raw_id = cells[0].lower()
+            out.append(
+                Endpoint(
+                    provider=p.name,
+                    raw_id=raw_id,
+                    base_url=p.base_url,
+                    keys=normalize.keys(raw_id),
+                    priority=p.priority,
+                    vision="vision" in heading,
+                )
+            )
+    return out
+
+
+_PARSERS = {"openrouter": parse_openrouter, "opencode": parse_opencode, "openai": parse_openai, "zai": parse_zai}
 
 
 def reconcile(endpoints: list[Endpoint], settings: Settings, scorebook: ScoreBook | None = None) -> dict[str, Model]:
@@ -212,6 +260,7 @@ class Catalog:
         self._by_provider: dict[str, list[Endpoint]] = {}
         self.errors: dict[str, str] = {}  # provider -> last discovery error
         self.skipped: dict[str, str] = {}  # provider -> why it is not in use
+        self._probes: dict[tuple[str, str], tuple[bool, float]] = {}  # (provider, model) -> (answers, valid until)
         self._lock = asyncio.Lock()
 
     def active_providers(self) -> list[ProviderConfig]:
@@ -232,13 +281,60 @@ class Catalog:
                 Endpoint(provider=p.name, raw_id=m, base_url=p.base_url, keys=normalize.keys(m), priority=p.priority)
                 for m in p.models
             ]
+        elif p.kind == "zai":
+            # A public docs page: the API key must not be sent to it.
+            r = await self.client.get(p.models_url or ZAI_PRICING_URL, timeout=20)
+            r.raise_for_status()
+            eps = parse_zai(p, r.text)
+            if not eps:  # layout changed: keep the previous list instead of emptying it
+                raise ValueError("no free model found on the pricing page")
         else:
             url = p.models_url or p.base_url.rstrip("/") + "/models"
             headers = {"Authorization": f"Bearer {p.api_key}", **p.headers}
             r = await self.client.get(url, headers=headers, timeout=20)
             r.raise_for_status()
             eps = _PARSERS[p.kind](p, r.json())
-        return [e for e in eps if e.keys and _wanted(p, e.raw_id)]
+        eps = [e for e in eps if e.keys and _wanted(p, e.raw_id)]
+        return await self._probe(p, eps) if p.probe else eps
+
+    async def _probe_one(self, p: ProviderConfig, ep: Endpoint) -> bool | None:
+        """True: answers a chat. False: refuses it for good (404 gone, 400 not a chat model).
+        None: inconclusive (rate limit, 5xx, timeout, network), so ask again soon."""
+        try:
+            r = await self.client.post(
+                p.base_url.rstrip("/") + "/chat/completions",
+                headers={"Authorization": f"Bearer {p.api_key}", **p.headers},
+                json={"model": ep.raw_id, "max_tokens": 1, "messages": [{"role": "user", "content": "hi"}]},
+                timeout=PROBE_TIMEOUT,
+            )
+        except httpx.HTTPError:
+            return None
+        if r.is_success:
+            return True
+        return False if r.status_code in (400, 404, 410, 422) else None
+
+    async def _probe(self, p: ProviderConfig, eps: list[Endpoint]) -> list[Endpoint]:
+        """Keep the models that answer a real chat request. Verdicts are remembered, so a
+        refresh only asks about models it has not seen (or whose verdict has expired)."""
+        gate = asyncio.Semaphore(PROBE_PARALLEL)
+
+        async def verdict(ep: Endpoint) -> bool:
+            known = self._probes.get((p.name, ep.raw_id))
+            if known and time.monotonic() < known[1]:
+                return known[0]
+            async with gate:
+                ok = await self._probe_one(p, ep)
+            if ok is None:  # keep the old verdict, if any, and ask again soon
+                ok, ttl = (known[0] if known else False), PROBE_RETRY_TTL
+            else:
+                ttl = PROBE_OK_TTL if ok else PROBE_GONE_TTL
+            self._probes[(p.name, ep.raw_id)] = (ok, time.monotonic() + ttl)
+            return ok
+
+        verdicts = await asyncio.gather(*(verdict(e) for e in eps))
+        kept = [e for e, ok in zip(eps, verdicts) if ok]
+        log.info("probe %s: %d of %d listed models answer a chat", p.name, len(kept), len(eps))
+        return kept
 
     async def refresh(self) -> None:
         async with self._lock:

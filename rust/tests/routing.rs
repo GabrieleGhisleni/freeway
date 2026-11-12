@@ -599,3 +599,40 @@ async fn fake_model_streams_words_then_usage_then_done() {
     assert_eq!(usage["choices"], json!([]));
     assert_eq!(chunks.iter().filter(|c| c["choices"][0]["finish_reason"] == "stop").count(), 1);
 }
+
+#[tokio::test]
+async fn probe_keeps_only_listed_models_that_answer_a_chat() {
+    init_env();
+    let fake = Arc::new(
+        Fake::new(&[("a", &["good", "gone", "not-chat", "flaky"])])
+            .on("a", "gone", Reply::Json(404, json!({ "error": "no such function" }), vec![]))
+            .on("a", "not-chat", Reply::Json(400, json!({ "error": "no text input" }), vec![]))
+            .on("a", "flaky", limited("1")),
+    );
+    let port = serve_fake(fake.clone()).await;
+    let yaml = format!(
+        "scores: null
+tiers: [{{ name: fast, min_score: 0 }}]
+providers:
+  - {{ name: a, base_url: 'http://127.0.0.1:{port}/a/v1', api_key_env: KEY_A, probe: true }}
+"
+    );
+    let settings = Arc::new(Settings::from_yaml(&yaml).unwrap());
+    let client = build_client(settings.connect_timeout);
+    let (app, catalog) = build_app(settings, vec!["secret".into()], client).await;
+    let h = Harness { app, fake: fake.clone() };
+
+    // The listing also carries the tiers and the built-in `fake` model; look only at provider `a`.
+    let listed = |r: Reply2| -> Vec<String> {
+        let all: Vec<String> = r.json()["data"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap().to_string()).collect();
+        ["good", "gone", "not-chat", "flaky"].iter().filter(|m| all.iter().any(|a| a == *m)).map(|m| m.to_string()).collect()
+    };
+    // 404 and 400 are final; a rate limit proves nothing, so the model stays out until it answers.
+    assert_eq!(listed(h.get("/v1/models", Some("secret")).await), ["good"]);
+
+    // Verdicts are remembered, the inconclusive one included until its retry time: no new probes.
+    let before = fake.calls().len();
+    catalog.refresh().await;
+    assert_eq!(fake.calls().len() - before, 0);
+    assert_eq!(listed(h.get("/v1/models", Some("secret")).await), ["good"]);
+}
