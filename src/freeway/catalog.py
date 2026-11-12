@@ -13,7 +13,7 @@ from . import normalize
 from .config import ProviderConfig, Settings
 from .scores import ScoreBook
 
-log = logging.getLogger("llm_router.catalog")
+log = logging.getLogger("freeway.catalog")
 
 # Listed by generic providers next to chat models, but not chat models.
 _NON_CHAT = ["*whisper*", "*tts*", "*guard*", "*embed*", "*rerank*", "*moderation*", "*speech*"]

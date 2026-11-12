@@ -18,8 +18,8 @@ Serve prima `.env` con almeno un token e una chiave di provider (tabella sotto).
 
 ```bash
 cp .env.example .env      # poi compilalo
-uv sync && uv run llm-router                                  # Python: http://127.0.0.1:4100
-cd rust && cargo build --release && cd .. && ./rust/target/release/llm-router   # Rust
+uv sync && uv run freeway                                  # Python: http://127.0.0.1:4100
+cd rust && cargo build --release && cd .. && ./rust/target/release/freeway   # Rust
 ```
 
 Opzioni (uguali nelle due versioni): `--port 4200 --host 127.0.0.1 --config altro.yaml`.
@@ -238,7 +238,7 @@ uv run pytest            # Python, provider finti, senza rete
 cd rust && cargo test    # Rust: unit test e integrazione (rust/tests/routing.rs)
 ```
 
-Python in `src/llm_router/`: `config.py`, `catalog.py` (scoperta e fusione dei modelli), `normalize.py`, `scores.py`, `router.py` (scelta e fallback), `health.py` (pause), `app.py` (HTTP).
+Python in `src/freeway/`: `config.py`, `catalog.py` (scoperta e fusione dei modelli), `normalize.py`, `scores.py`, `router.py` (scelta e fallback), `health.py` (pause), `app.py` (HTTP).
 Rust in `rust/src/`: gli stessi moduli, più `http.rs`, `util.rs`, `systemone.rs` (Decision API) e `fake.rs`.
 
 ---
@@ -254,13 +254,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh        # poi riap
 git clone https://github.com/GabrieleGhisleni/freeway.git ~/freeway && cd ~/freeway
 (cd rust && cargo build --release)
 cp .env.example .env && chmod 600 .env && nano .env && mkdir -p data   # chiavi e ROUTER_TOKENS
-sudo cp deploy/llm-router-rust.service /etc/systemd/system/llm-router.service   # controlla User e percorsi /home/pi/freeway
-sudo systemctl daemon-reload && sudo systemctl enable --now llm-router
+sudo cp deploy/freeway-rust.service /etc/systemd/system/freeway.service   # controlla User e percorsi /home/pi/freeway
+sudo systemctl daemon-reload && sudo systemctl enable --now freeway
 curl -H "Authorization: Bearer <token>" http://127.0.0.1:4100/health
 ```
 
 Il servizio ascolta su `0.0.0.0`: imposta sempre `ROUTER_TOKENS` e non esporlo su internet (rete di casa o VPN come Tailscale). I client usano `base_url = http://<ip-del-pi>:4100/v1`.
-Log: `journalctl -u llm-router -f`. Aggiornamento: `git pull && (cd rust && cargo build --release) && sudo systemctl restart llm-router`.
+Log: `journalctl -u freeway -f`. Aggiornamento: `git pull && (cd rust && cargo build --release) && sudo systemctl restart freeway`.
 
 ---
 

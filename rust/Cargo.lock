@@ -212,6 +212,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "freeway"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "axum",
+ "bytes",
+ "dotenvy",
+ "futures-util",
+ "http-body-util",
+ "regex",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "subtle",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -595,29 +618,6 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
-
-[[package]]
-name = "llm-router"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "axum",
- "bytes",
- "dotenvy",
- "futures-util",
- "http-body-util",
- "regex",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "serde_yaml",
- "subtle",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "log"

@@ -6,8 +6,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from llm_router.app import create_app
-from llm_router.config import Settings
+from freeway.app import create_app
+from freeway.config import Settings
 
 OK = {"id": "x", "object": "chat.completion", "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}}]}
 
@@ -208,8 +208,8 @@ def test_streaming_switches_provider_before_first_byte():
 
 
 def test_tools_request_skips_endpoints_known_not_to_support_tools():
-    from llm_router.catalog import Endpoint
-    from llm_router.router import needs
+    from freeway.catalog import Endpoint
+    from freeway.router import needs
 
     assert needs({"tools": [{}], "messages": []}) == (True, False)
     img = {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]}

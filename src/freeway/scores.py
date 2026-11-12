@@ -15,7 +15,7 @@ import httpx
 from . import normalize
 from .config import ScoresConfig
 
-log = logging.getLogger("llm_router.scores")
+log = logging.getLogger("freeway.scores")
 
 URL = "https://artificialanalysis.ai/api/v2/language/models/free"
 

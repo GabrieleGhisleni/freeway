@@ -79,7 +79,7 @@ wheels = [
 ]
 
 [[package]]
-name = "free-llm-router"
+name = "freeway"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

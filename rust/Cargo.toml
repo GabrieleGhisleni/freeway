@@ -1,15 +1,15 @@
 [package]
-name = "llm-router"
+name = "freeway"
 version = "0.1.0"
 edition = "2024"
 description = "Local OpenAI-compatible server that routes requests across free LLM providers by intelligence tier"
 
 [lib]
-name = "llm_router"
+name = "freeway"
 path = "src/lib.rs"
 
 [[bin]]
-name = "llm-router"
+name = "freeway"
 path = "src/main.rs"
 
 [dependencies]

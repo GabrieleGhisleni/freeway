@@ -3,9 +3,9 @@ import json
 import httpx
 import pytest
 
-from llm_router import scores
-from llm_router.catalog import Endpoint, reconcile
-from llm_router.config import ScoresConfig, Settings
+from freeway import scores
+from freeway.catalog import Endpoint, reconcile
+from freeway.config import ScoresConfig, Settings
 
 
 def row(slug, value):
@@ -27,7 +27,7 @@ def book(tmp_path, rows):
 
 
 def ep(raw):
-    from llm_router import normalize
+    from freeway import normalize
 
     return Endpoint("p", raw, "https://p.test/v1", normalize.keys(raw))
 

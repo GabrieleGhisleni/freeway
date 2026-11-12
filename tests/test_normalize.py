@@ -1,4 +1,4 @@
-from llm_router import normalize as n
+from freeway import normalize as n
 
 
 def test_key_strips_vendor_suffix_and_date():
@@ -20,8 +20,8 @@ def test_key_edge_cases():
 
 
 def test_google_models_prefix_is_stripped_from_upstream_id():
-    from llm_router.catalog import parse_openai
-    from llm_router.config import ProviderConfig
+    from freeway.catalog import parse_openai
+    from freeway.config import ProviderConfig
 
     p = ProviderConfig(name="google", base_url="https://g.test/v1", api_key_env="K")
     [ep] = parse_openai(p, {"data": [{"id": "models/gemini-3.8-flash"}]})

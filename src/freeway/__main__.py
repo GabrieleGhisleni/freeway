@@ -7,7 +7,7 @@ from dotenv import find_dotenv, load_dotenv
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="llm-router")
+    parser = argparse.ArgumentParser(prog="freeway")
     parser.add_argument("--config", default=None, help="path to config.yaml (default: $ROUTER_CONFIG or ./config.yaml)")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)

@@ -7,10 +7,10 @@ use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use http_body_util::BodyExt;
-use llm_router::app::build_app;
-use llm_router::config::{ScoresConfig, Settings};
-use llm_router::http::build_client;
-use llm_router::scores::ScoreBook;
+use freeway::app::build_app;
+use freeway::config::{ScoresConfig, Settings};
+use freeway::http::build_client;
+use freeway::scores::ScoreBook;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Once};
@@ -399,7 +399,7 @@ async fn status_endpoint_reports_tiers_and_unrated() {
 // ---- scores ----------------------------------------------------------------
 
 fn temp_cache(name: &str) -> String {
-    std::env::temp_dir().join(format!("llm-router-test-{}-{name}.json", std::process::id())).to_string_lossy().to_string()
+    std::env::temp_dir().join(format!("freeway-test-{}-{name}.json", std::process::id())).to_string_lossy().to_string()
 }
 
 async fn serve_scores() -> u16 {

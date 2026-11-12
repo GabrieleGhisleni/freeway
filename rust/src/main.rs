@@ -1,8 +1,8 @@
-use llm_router::{app, config, http};
+use freeway::{app, config, http};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-const USAGE: &str = "llm-router [--config config.yaml] [--host 127.0.0.1] [--port 4100]\n\
+const USAGE: &str = "freeway [--config config.yaml] [--host 127.0.0.1] [--port 4100]\n\
 Reads .env from the current folder (or a parent). Config path: --config, else $ROUTER_CONFIG, else ./config.yaml.";
 
 async fn shutdown_signal() {
@@ -42,7 +42,7 @@ async fn main() -> ExitCode {
 
     let _ = dotenvy::dotenv(); // .env of the folder the server is started from (or a parent)
     let level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".into()).to_lowercase();
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::new(format!("warn,llm_router={level}"))).init();
+    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::new(format!("warn,freeway={level}"))).init();
 
     let settings = match config::load_settings(config_path.as_deref()) {
         Ok(s) => Arc::new(s),

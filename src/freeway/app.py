@@ -19,7 +19,7 @@ from .health import Health
 from .router import Exhausted, Router, UnknownModel
 from .scores import ScoreBook
 
-log = logging.getLogger("llm_router")
+log = logging.getLogger("freeway")
 
 
 def _error(status: int, message: str, kind: str = "router_error", **extra) -> JSONResponse:
@@ -68,7 +68,7 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
             if owns_client:
                 await http.aclose()
 
-    app = FastAPI(title="free-llm-router", lifespan=lifespan)
+    app = FastAPI(title="freeway", lifespan=lifespan)
 
     @app.middleware("http")
     async def auth(request: Request, call_next):

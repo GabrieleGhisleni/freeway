@@ -15,7 +15,7 @@ from .catalog import Catalog, Endpoint, Model
 from .config import Settings
 from .health import Health
 
-log = logging.getLogger("llm_router")
+log = logging.getLogger("freeway")
 
 
 @dataclass
