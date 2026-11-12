@@ -8,11 +8,15 @@ il router trova un provider che lo serva davvero.
 Due versioni equivalenti, stesso `config.yaml` e stesso `.env`: **Python** (`src/`) e **Rust** (`rust/`, un solo binario, senza Python).
 La Decision API, `GET /v1/models/{id}` e il modello `fake` esistono solo nella versione Rust.
 
+**Documentazione**
+
+- [docs/uso.md](docs/uso.md): come chiamare il servizio (URL, token, `model`, header, errori, endpoint).
+- [docs/deploy.md](docs/deploy.md): Raspberry Pi, Cloudflare Tunnel, `deploy/deploy.sh` e gestione dei secrets.
+- Più sotto: come il router sceglie i modelli, `config.yaml`, modello `fake`, Decision API.
+
 ---
 
-# Uso
-
-## Avvio
+# Avvio locale
 
 Serve prima `.env` con almeno un token e una chiave di provider (tabella sotto).
 
@@ -38,89 +42,16 @@ Dopo ogni modifica a `config.yaml` o `.env` **riavvia**.
 Un provider senza chiave viene **saltato** (lo dice `/admin/status`). Senza `ROUTER_TOKENS` il server è aperto a chiunque lo raggiunga.
 Ogni token vale da solo: per dare accesso a un'app ne aggiungi uno, per toglierlo lo cancelli e riavvii. `.env` è nel `.gitignore`.
 
-## Come si chiama
-
-È un normale endpoint OpenAI: `base_url = http://127.0.0.1:4100/v1`, `api_key = <uno dei ROUTER_TOKENS>`
-(`Authorization: Bearer ...`, oppure l'header `x-api-key`).
+# Deploy su Raspberry Pi
 
 ```bash
-curl http://127.0.0.1:4100/v1/chat/completions \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"model":"smart","messages":[{"role":"user","content":"Ciao!"}]}'
+deploy/deploy.sh                  # test + build aarch64 (Docker) + upload + restart sul Pi
+deploy/deploy.sh --no-build       # riusa l'ultima build; altre opzioni: --skip-tests, --force
+deploy/env.sh set GEMINI_API_KEY  # chiavi e token: solo sul Pi, mai da git (anche: keys, new-token, edit)
 ```
 
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://127.0.0.1:4100/v1", api_key="<uno dei ROUTER_TOKENS>")
-r = client.chat.completions.create(model="smart", messages=[{"role": "user", "content": "Ciao!"}])
-print(r.choices[0].message.content)
-```
-
-Funzionano streaming, tool calling e immagini, **se** il modello scelto li supporta (il router salta gli endpoint che dichiarano di no).
-Esiste solo la chat: niente embeddings, niente formato Anthropic.
-
-### Cosa mettere in `model`
-
-| Valore | Cosa succede |
-|---|---|
-| `smart`, `balanced`, `fast` | **Tier**: prova i modelli migliori del tier, poi quelli dei tier di riserva |
-| `gemini-3.8-flash` | **Sempre lo stesso modello**, su qualunque provider lo abbia. Non scala ad altri modelli |
-| `openrouter/nvidia/nemotron-3.5-super-vl:free` | **Un solo endpoint** di un solo provider (`<provider>/<id del provider>`) |
-| `fake` | Risposta **inventata in locale**, nessun provider contattato (solo Rust, vedi sotto) |
-
-I nomi validi si leggono con `GET /v1/models`.
-
-### Header della richiesta (opzionali)
-
-| Header | Valori | Effetto |
-|---|---|---|
-| `x-router-fallback` | `auto` (default) | i tier scalano ai tier di riserva; un modello per nome non cambia modello |
-| | `none` | resta nel tier/modello richiesto; se non c'è niente risponde 503 |
-| | `tier` | anche un modello per nome, se fallisce, scala ai modelli del suo tier |
-| `x-router-session` | un id qualsiasi | tiene la conversazione sullo stesso modello finché risponde (120 min) |
-
-### Header della risposta: chi ha risposto
-
-`x-router-model`, `x-router-tier` (o `unrated`), `x-router-provider`, `x-router-upstream-model`, `x-router-attempts` (tentativi, compreso quello riuscito).
-Guardali: un tier può **declassare** in silenzio (`smart` può rispondere con un modello `balanced`). Per non declassare usa `x-router-fallback: none`.
-
-### Ragionamento (reasoning)
-
-Il router **inoltra il body così com'è**, quindi il ragionamento si controlla con il parametro standard OpenAI `reasoning_effort`, in ogni richiesta:
-
-```python
-client.chat.completions.create(model="fast", reasoning_effort="none", messages=[...])
-```
-
-- `"none"` è l'unico valore **verificato**: spegne il ragionamento su OpenRouter e su Google (un modello `fast`: ~9 s e ~390 token con ragionamento, meno di 1 s senza; `gemini-3.5-flash`: 5,9 s contro 2,0 s). Su OpenCode non è stato possibile provarlo (429).
-- `"minimal"`, `"low"`, `"medium"`, `"high"` non sono stati provati; su OpenRouter `low` riduce il ragionamento ma non lo toglie.
-- Senza il parametro ogni modello fa come vuole: è la scelta per i tier alti, dove il ragionamento serve.
-- Non usare l'oggetto `reasoning: {...}` di OpenRouter: Google lo rifiuta con 400. Un modello che rifiuta il valore risponde 400: il router non lo mette in pausa e prova l'endpoint dopo.
-- Non c'è ancora un default per tier in `config.yaml`.
-
-### Errori
-
-| Codice | Significato |
-|---|---|
-| 401 | token mancante o sbagliato |
-| 404 | modello o tier sconosciuto (il messaggio elenca i tier) |
-| 502 | tutti gli endpoint provati hanno fallito; `error.tried` dice cosa è successo a ciascuno |
-| 503 `all_providers_busy` | tutto è in pausa; header `retry-after` con i secondi |
-| 503 `no_endpoint` | nessun provider caricato, tier vuoto con `fallback: none`, o nessun modello supporta tool/immagini |
-
-### Altri endpoint
-
-Tutti richiedono il token, compreso `/health`.
-
-| Endpoint | Cosa fa |
-|---|---|
-| `GET /v1/models` | tier e modelli con tier, punteggio e provider |
-| `GET /v1/models/{id}` | un solo tier o modello (anche `<provider>/<id>`); 404 `model_not_found`. Solo Rust |
-| `GET /admin/status` | provider attivi/saltati, punteggi, modelli per tier con pause ed errori, elenco `unrated` |
-| `POST /admin/refresh` | rilegge subito gli elenchi dei provider |
-| `GET /health` | `{"status":"ok"}` |
-| `POST /v1/systemone` | Decision API, solo Rust (vedi sotto) |
+`deploy.sh` compila sul PC e carica sul Pi solo il binario e `config.yaml`; il `.env` non lo tocca. Rifiuta di partire se non sei su `main` o se ci sono modifiche non committate.
+Sul Pi basta una cartella con `freeway`, `config.yaml`, `.env` e `data/`; il server è esposto con un Cloudflare Tunnel. Dettagli, prima installazione e operazioni: [docs/deploy.md](docs/deploy.md).
 
 ---
 
@@ -240,27 +171,6 @@ cd rust && cargo test    # Rust: unit test e integrazione (rust/tests/routing.rs
 
 Python in `src/freeway/`: `config.py`, `catalog.py` (scoperta e fusione dei modelli), `normalize.py`, `scores.py`, `router.py` (scelta e fallback), `health.py` (pause), `app.py` (HTTP).
 Rust in `rust/src/`: gli stessi moduli, più `http.rs`, `util.rs`, `systemone.rs` (Decision API) e `fake.rs`.
-
----
-
-# Raspberry Pi (minimale)
-
-Serve un Pi con Linux a 64 bit (`uname -m` → `aarch64`). La build è lenta ma si fa una volta; la cross-compilazione dal PC non è stata provata.
-
-```bash
-# sul Pi
-sudo apt install -y build-essential git
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh        # poi riapri la shell
-git clone https://github.com/GabrieleGhisleni/freeway.git ~/freeway && cd ~/freeway
-(cd rust && cargo build --release)
-cp .env.example .env && chmod 600 .env && nano .env && mkdir -p data   # chiavi e ROUTER_TOKENS
-sudo cp deploy/freeway-rust.service /etc/systemd/system/freeway.service   # controlla User e percorsi /home/pi/freeway
-sudo systemctl daemon-reload && sudo systemctl enable --now freeway
-curl -H "Authorization: Bearer <token>" http://127.0.0.1:4100/health
-```
-
-Il servizio ascolta su `0.0.0.0`: imposta sempre `ROUTER_TOKENS` e non esporlo su internet (rete di casa o VPN come Tailscale). I client usano `base_url = http://<ip-del-pi>:4100/v1`.
-Log: `journalctl -u freeway -f`. Aggiornamento: `git pull && (cd rust && cargo build --release) && sudo systemctl restart freeway`.
 
 ---
 
