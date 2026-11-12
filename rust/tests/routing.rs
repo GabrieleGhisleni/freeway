@@ -547,3 +547,46 @@ async fn decision_validates_the_request() {
     assert_eq!(h.send(anon).await.status, 401);
     assert!(h.fake.calls().is_empty());
 }
+
+#[tokio::test]
+async fn fake_model_answers_without_touching_any_provider() {
+    let h = start(Fake::new(&[("a", &["big-500b"]), ("b", &[])]), DEFAULT_MODELS, &["secret"]).await;
+    let r = h.chat("fake").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("x-router-provider"), "fake");
+    let body = r.json();
+    assert_eq!(body["system_fingerprint"], "fake");
+    assert!(body["choices"][0]["message"]["content"].as_str().unwrap().len() > 20);
+    // Same prompt, same text.
+    assert_eq!(h.chat("fake").await.json()["choices"][0]["message"], body["choices"][0]["message"]);
+    assert!(h.fake.calls().is_empty());
+    // Listed and retrievable, but never part of a tier.
+    let listed = h.get("/v1/models", Some("secret")).await.json();
+    assert!(listed["data"].as_array().unwrap().iter().any(|m| m["id"] == "fake" && m["owned_by"] == "router-fake"));
+    assert_eq!(h.get("/v1/models/fake", Some("secret")).await.status, 200);
+    let status = h.get("/admin/status", Some("secret")).await.json();
+    assert!(!status["tiers"].to_string().contains("\"fake\""));
+    // Still behind the token.
+    let anon = Request::builder().method("POST").uri("/v1/chat/completions").body(Body::from(json!({ "model": "fake", "messages": [] }).to_string())).unwrap();
+    assert_eq!(h.send(anon).await.status, 401);
+}
+
+#[tokio::test]
+async fn fake_model_streams_words_then_usage_then_done() {
+    let h = start(Fake::new(&[("a", &["big-500b"]), ("b", &[])]), DEFAULT_MODELS, &["secret"]).await;
+    let body = json!({ "model": "fake", "stream": true, "messages": [{ "role": "user", "content": "ciao" }] });
+    let r = h.chat_with(body, &[]).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("content-type"), "text/event-stream");
+    let text = String::from_utf8(r.body.clone()).unwrap();
+    let events: Vec<&str> = text.split("\n\n").filter(|e| !e.is_empty()).collect();
+    assert_eq!(*events.last().unwrap(), "data: [DONE]");
+    let chunks: Vec<Value> = events.iter().filter_map(|e| e.strip_prefix("data: ")).filter_map(|d| serde_json::from_str(d).ok()).collect();
+    assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+    let streamed: String = chunks.iter().filter_map(|c| c["choices"][0]["delta"]["content"].as_str()).collect();
+    assert!(streamed.split_whitespace().count() > 5);
+    // stream=true makes the server ask for usage, so the last chunk before [DONE] carries it.
+    let usage = chunks.iter().find(|c| c["usage"].is_object()).expect("usage chunk");
+    assert_eq!(usage["choices"], json!([]));
+    assert_eq!(chunks.iter().filter(|c| c["choices"][0]["finish_reason"] == "stop").count(), 1);
+}

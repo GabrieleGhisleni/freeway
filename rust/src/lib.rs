@@ -1,6 +1,7 @@
 pub mod app;
 pub mod catalog;
 pub mod config;
+pub mod fake;
 pub mod health;
 pub mod http;
 pub mod normalize;

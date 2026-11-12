@@ -2,6 +2,7 @@
 
 use crate::catalog::{Catalog, Model};
 use crate::config::Settings;
+use crate::fake;
 use crate::health::Health;
 use crate::router::{CompleteError, Router, SuccessBody};
 use crate::scores::ScoreBook;
@@ -117,6 +118,10 @@ fn tier_object(name: &str, created: i64) -> Value {
     json!({ "id": name, "object": "model", "created": created, "owned_by": "router-tier" })
 }
 
+fn fake_object(created: i64) -> Value {
+    json!({ "id": fake::MODEL, "object": "model", "created": created, "owned_by": "router-fake" })
+}
+
 fn model_object(m: &Model, id: &str, created: i64) -> Value {
     json!({
         "id": id,
@@ -133,6 +138,7 @@ async fn list_models(State(st): State<AppState>) -> Json<Value> {
     let created = now() as i64;
     let mut data: Vec<Value> = st.settings.tiers.iter().map(|t| tier_object(&t.name, created)).collect();
     data.extend(st.catalog.all_models().iter().map(|m| model_object(m, &m.name, created)));
+    data.push(fake_object(created));
     Json(json!({ "object": "list", "data": data }))
 }
 
@@ -142,6 +148,9 @@ async fn get_model(State(st): State<AppState>, Path(id): Path<String>) -> Respon
     let created = now() as i64;
     if st.settings.tier(&id).is_some() {
         return Json(tier_object(&id, created)).into_response();
+    }
+    if id == fake::MODEL {
+        return Json(fake_object(created)).into_response();
     }
     if let Some((m, _)) = st.catalog.find_endpoint(&id) {
         return Json(model_object(&m, &id, created)).into_response();
@@ -245,6 +254,9 @@ async fn chat(State(st): State<AppState>, headers: HeaderMap, raw: Bytes) -> Res
         // Needed so streamed answers still carry token counts when providers support it.
         body["stream_options"] = json!({ "include_usage": true });
     }
+    if body["model"] == fake::MODEL {
+        return fake_chat(&body);
+    }
 
     match st.router.complete(body, &fallback, session.as_deref()).await {
         Ok(success) => {
@@ -264,6 +276,21 @@ async fn chat(State(st): State<AppState>, headers: HeaderMap, raw: Bytes) -> Res
         }
         Err(e) => complete_error(&st, e),
     }
+}
+
+/// The built-in `fake` model: made-up text, no provider contacted.
+fn fake_chat(body: &Value) -> Response {
+    let resp = if truthy(body.get("stream")) {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(Body::from_stream(fake::stream(body)))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    } else {
+        Json(fake::completion(body)).into_response()
+    };
+    with_headers(resp, fake::headers())
 }
 
 /// How many different models are asked before giving up on getting a usable decision.
