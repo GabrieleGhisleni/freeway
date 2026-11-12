@@ -4,10 +4,10 @@ use crate::catalog::{Catalog, Model};
 use crate::config::Settings;
 use crate::fake;
 use crate::health::Health;
-use crate::router::{CompleteError, Router, SuccessBody};
+use crate::router::{Attempt, CompleteError, Router, SuccessBody};
 use crate::scores::ScoreBook;
 use crate::systemone;
-use crate::util::{now, truthy};
+use crate::util::{now, truncate, truthy};
 use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, Request, State};
@@ -341,7 +341,7 @@ async fn systemone(State(st): State<AppState>, headers: HeaderMap, raw: Bytes) -
         }
     }
     error_response(
-        StatusCode::BAD_GATEWAY,
+        StatusCode::SERVICE_UNAVAILABLE, // not 502: Cloudflare would replace the JSON with an HTML page
         format!("no model returned a usable decision after {DECISION_TRIES} tries: {last_problem}"),
         "all_providers_failed",
     )
@@ -364,7 +364,9 @@ fn complete_error(st: &AppState, err: CompleteError) -> Response {
                 let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
                 return (code, Json(body.clone())).into_response();
             }
-            let tried = serde_json::to_value(&e.attempts).unwrap_or(Value::Null);
+            // Keep the answer readable: the provider's error text is cut (the full text is in the server log).
+            let short: Vec<Attempt> = e.attempts.iter().map(|a| Attempt { error: truncate(&a.error, 120), ..a.clone() }).collect();
+            let tried = serde_json::to_value(&short).unwrap_or(Value::Null);
             if e.candidates == 0 && e.skipped > 0 {
                 let retry = e.retry_in.unwrap_or(1.0).round().max(1.0) as u64;
                 let mut resp = (
@@ -387,13 +389,33 @@ fn complete_error(st: &AppState, err: CompleteError) -> Response {
                     "no_endpoint",
                 );
             }
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": { "message": "all providers failed", "type": "all_providers_failed", "tried": tried } })),
+            // 503, never 502/504: Cloudflare replaces an origin's 502 and 504 with its own HTML page,
+            // so the caller would never see this JSON. The first line of the message is the whole story.
+            let mut resp = (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": { "message": exhausted_message(&e.attempts), "type": "all_providers_failed", "tried": tried } })),
             )
-                .into_response()
+                .into_response();
+            // Come back when the first paused endpoint is free again.
+            if let Some(wait) = e.attempts.iter().map(|a| a.cooldown_seconds).filter(|s| *s > 0).min() {
+                resp.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(wait as u64));
+            }
+            resp
         }
     }
+}
+
+/// "all 8 endpoints tried failed (5 rate_limit, 2 server, 1 unavailable)".
+fn exhausted_message(attempts: &[Attempt]) -> String {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for a in attempts {
+        match counts.iter_mut().find(|(k, _)| *k == a.kind) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((a.kind, 1)),
+        }
+    }
+    let detail: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
+    format!("all {} endpoints tried failed ({}). Details in error.tried; GET /admin/status shows the pauses.", attempts.len(), detail.join(", "))
 }
 
 #[cfg(test)]

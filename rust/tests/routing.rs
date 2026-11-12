@@ -241,8 +241,10 @@ async fn fallback_none_stays_in_tier() {
     let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
     let body = json!({ "model": "smart", "messages": [{ "role": "user", "content": "hi" }] });
     let r = h.chat_with(body, &[("x-router-fallback", "none")]).await;
-    assert_eq!(r.status, 502);
+    // 503, not 502: Cloudflare would replace an origin 502 with an HTML page.
+    assert_eq!(r.status, 503);
     assert_eq!(r.json()["error"]["type"], "all_providers_failed");
+    assert!(r.json()["error"]["message"].as_str().unwrap().contains("1 server"), "{}", r.json());
     assert!(h.fake.calls().iter().all(|(_, m)| m == "big-500b"));
 }
 
@@ -251,7 +253,7 @@ async fn named_model_does_not_leave_the_model_by_default() {
     let fake = Fake::new(&[("a", &["big-500b", "small-1b"]), ("b", &[])])
         .on("a", "big-500b", Reply::Json(503, json!({ "error": "down" }), vec![]));
     let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
-    assert_eq!(h.chat("big-500b").await.status, 502);
+    assert_eq!(h.chat("big-500b").await.status, 503);
     // ...unless the caller allows falling back through the tier.
     let body = json!({ "model": "big-500b", "messages": [{ "role": "user", "content": "hi" }] });
     let r = h.chat_with(body, &[("x-router-fallback", "tier")]).await;
@@ -324,7 +326,12 @@ async fn error_inside_200_body_triggers_fallback() {
 async fn all_cooling_down_gives_503_with_retry_after() {
     let fake = Fake::new(&[("a", &["big-500b"]), ("b", &[])]).on("a", "big-500b", limited("45"));
     let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
-    assert_eq!(h.chat("big-500b").await.status, 502);
+    // First call: the endpoint answers 429, so every attempt failed (503 all_providers_failed, retry-after = its pause).
+    let first = h.chat("big-500b").await;
+    assert_eq!(first.status, 503);
+    assert_eq!(first.json()["error"]["type"], "all_providers_failed");
+    assert!(first.json()["error"]["message"].as_str().unwrap().contains("1 rate_limit"), "{}", first.json());
+    assert!((1..=45).contains(&first.header("retry-after").parse::<u32>().unwrap()));
     let r = h.chat("big-500b").await;
     assert_eq!(r.status, 503);
     assert_eq!(r.json()["error"]["type"], "all_providers_busy");
@@ -525,11 +532,13 @@ async fn decision_goes_to_another_model_when_the_answer_is_unusable() {
 }
 
 #[tokio::test]
-async fn decision_gives_502_when_no_model_answers_usably() {
+async fn decision_gives_503_when_no_model_answers_usably() {
     let fake = Fake::new(&[("a", &["small-1b"]), ("b", &[])]).on("a", "small-1b", says("no json at all"));
     let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
     let r = h.post_json("/v1/systemone", decision_request("small-1b")).await;
-    assert!(r.status == 502 || r.status == 503, "{}", r.status);
+    // Each unusable answer pauses its endpoint, so the last try can find everything paused.
+    assert_eq!(r.status, 503);
+    assert!(["all_providers_failed", "all_providers_busy"].contains(&r.json()["error"]["type"].as_str().unwrap()), "{}", r.json());
 }
 
 #[tokio::test]

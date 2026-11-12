@@ -201,7 +201,7 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
                     503, "no endpoint can serve this request (no providers loaded, or none supports the tools/images it needs)", "no_endpoint"
                 )
             return JSONResponse(
-                {"error": {"message": "all providers failed", "type": "all_providers_failed", "tried": tried}}, status_code=502
+                {"error": {"message": "all providers failed", "type": "all_providers_failed", "tried": tried}}, status_code=503
             )
 
         if result.stream is not None:

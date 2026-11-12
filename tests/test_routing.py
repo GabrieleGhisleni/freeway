@@ -124,7 +124,7 @@ def test_fallback_none_stays_in_tier():
             json={"model": "smart", "messages": [{"role": "user", "content": "hi"}]},
             headers={**AUTH, "x-router-fallback": "none"},
         )
-        assert r.status_code == 502
+        assert r.status_code == 503
         assert r.json()["error"]["type"] == "all_providers_failed"
         assert all(m == "big-500b" for _, m in fake.calls)
 
@@ -135,7 +135,7 @@ def test_named_model_does_not_leave_the_model_by_default():
         {("a.test", "big-500b"): lambda: httpx.Response(503, json={"error": "down"})},
     )
     with client(fake) as c:
-        assert chat(c, "big-500b").status_code == 502
+        assert chat(c, "big-500b").status_code == 503
 
 
 def test_account_wide_rate_limit_stops_asking_that_provider():
@@ -185,7 +185,7 @@ def test_all_cooling_down_gives_503_with_retry_after():
     limited = lambda: httpx.Response(429, json={"error": "x"}, headers={"retry-after": "45"})
     fake = Fake({"a.test": ["big-500b"], "b.test": []}, {("a.test", "big-500b"): limited})
     with client(fake) as c:
-        assert chat(c, "big-500b").status_code == 502
+        assert chat(c, "big-500b").status_code == 503
         r = chat(c, "big-500b")
         assert r.status_code == 503
         assert 1 <= int(r.headers["retry-after"]) <= 45

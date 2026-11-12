@@ -85,9 +85,11 @@ client.chat.completions.create(model="fast", reasoning_effort="none", messages=[
 |---|---|
 | 401 | token mancante o sbagliato |
 | 404 | modello o tier sconosciuto (il messaggio elenca i tier) |
-| 502 | tutti gli endpoint provati hanno fallito; `error.tried` dice cosa è successo a ciascuno |
+| 503 `all_providers_failed` | tutti gli endpoint provati hanno fallito; il messaggio li riassume per tipo (es. `5 rate_limit, 2 server`), `error.tried` dice cosa è successo a ciascuno, `retry-after` indica quando uno si libera |
 | 503 `all_providers_busy` | tutto è in pausa; header `retry-after` con i secondi |
 | 503 `no_endpoint` | nessun provider caricato, tier vuoto con `fallback: none`, o nessun modello supporta tool/immagini |
+
+Un errore del router è sempre un JSON con `error.type`. Non usa mai 502 né 504: Cloudflare, davanti al server, li sostituisce con una sua pagina HTML.
 
 ### Altri endpoint
 
