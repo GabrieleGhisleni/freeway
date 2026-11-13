@@ -92,7 +92,8 @@ struct UpstreamFailure {
 
 impl UpstreamFailure {
     fn new(kind: FailKind, status: Option<u16>, message: impl Into<String>) -> Self {
-        Self { kind, status, message: message.into(), retry_after: None, body: None }
+        Self { kind, status, message: message.into(), retry_after: None, body: None,
+        }
     }
 }
 
@@ -144,7 +145,8 @@ fn retry_after(headers: &HeaderMap, body: Option<&Value>) -> Option<f64> {
 }
 
 fn error_text(body: Option<&Value>, fallback: &str) -> String {
-    let Some(body) = body.map(unwrap_body).filter(|b| b.is_object()) else { return fallback.to_string() };
+    let Some(body) = body.map(unwrap_body).filter(|b| b.is_object()) else { return fallback.to_string();
+    };
     let err = body.get("error").unwrap_or(body);
     match err {
         Value::Object(o) => match o.get("message") {
@@ -234,7 +236,8 @@ pub struct Router {
 
 impl Router {
     pub fn new(settings: Arc<Settings>, catalog: Arc<Catalog>, health: Arc<Health>, client: reqwest::Client) -> Self {
-        Self { settings, catalog, health, client, sessions: Mutex::new(HashMap::new()) }
+        Self { settings, catalog, health, client, sessions: Mutex::new(HashMap::new()),
+        }
     }
 
     // ---- choosing -------------------------------------------------------
@@ -263,8 +266,13 @@ impl Router {
         let Some(session) = session else { return };
         let t = now();
         let mut sessions = self.sessions.lock().unwrap();
-        if sessions.len() > 5000 {
+        if sessions.len() >= 5000 {
             sessions.retain(|_, v| v.1 > t);
+        }
+        if !sessions.contains_key(session) && sessions.len() >= 5000 {
+            if let Some(oldest) = sessions.iter().min_by(|a, b| a.1.1.total_cmp(&b.1.1)).map(|(k, _)| k.clone()) {
+                sessions.remove(&oldest);
+            }
         }
         sessions.insert(session.to_string(), (model.name.clone(), t + self.settings.session_ttl_minutes * 60.0));
     }
@@ -417,7 +425,11 @@ impl Router {
             let mut buf: Vec<u8> = Vec::new();
             let mut verdict = None;
             while let Some(chunk) = stream.next().await {
-                buf.extend_from_slice(&chunk.map_err(network_failure)?);
+                let chunk = chunk.map_err(network_failure)?;
+                if buf.len() + chunk.len() > 1048576 {
+                    return Err(UpstreamFailure::new(FailKind::Server, Some(200), "stream preamble exceeds 1 MiB"));
+                }
+                buf.extend_from_slice(&chunk);
                 if let Some(v) = first_event(&buf) {
                     verdict = Some(v);
                     break;
@@ -535,7 +547,8 @@ impl Router {
                         cand.model.tier.as_deref().unwrap_or("unrated"),
                         attempts.len()
                     );
-                    return Ok(Success { candidate: cand.clone(), failed_attempts: attempts.len(), body: body_out });
+                    return Ok(Success { candidate: cand.clone(), failed_attempts: attempts.len(), body: body_out,
+                    });
                 }
             }
         }
@@ -626,5 +639,28 @@ mod tests {
             Some(Verdict::Error(v)) => assert_eq!(v["error"]["code"], 429),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn session_cache_has_a_hard_limit() {
+        use crate::{catalog::Catalog, config::Settings, http};
+        let settings = Arc::new(Settings::from_yaml("scores: null\ntiers: []\nproviders: []").unwrap());
+        let client = http::build_client(1.0);
+        let catalog = Arc::new(Catalog::new(settings.clone(), client.clone(), None));
+        let router = Router::new(settings, catalog, Arc::new(Health::new()), client);
+        let model = Model {
+            name: "m".into(),
+            keys: Default::default(),
+            score: None,
+            tier: None,
+            endpoints: vec![],
+        };
+        for n in 0..5100 {
+            router.remember(Some(&n.to_string()), &model);
+        }
+        assert_eq!(router.sessions.lock().unwrap().len(), 5000);
+        assert_eq!(router.sticky(Some("5099")).as_deref(), Some("m"));
+        router.remember(Some("5099"), &model);
+        assert_eq!(router.sessions.lock().unwrap().len(), 5000);
     }
 }

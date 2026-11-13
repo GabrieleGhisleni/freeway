@@ -18,7 +18,7 @@ from .config import Settings, load_settings
 from .health import Health
 from .router import Exhausted, Router, UnknownModel
 from .scores import ScoreBook
-from .storage import Store, UsageParser, identity, named_tokens
+from .storage import Store, UsageParser, UsageWriter, identity, named_tokens
 
 log = logging.getLogger("freeway")
 
@@ -45,6 +45,8 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
         store = Store(settings.database_file)
         store.register(identity(token, names) for token in tokens)
         app.state.store = store
+        writer = UsageWriter(store)
+        app.state.writer = writer
         scorebook = ScoreBook(settings.scores, http, store) if settings.scores else None
         catalog = Catalog(settings, http, scorebook)
         health = Health()
@@ -70,7 +72,12 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
             yield
         finally:
             task.cancel()
-            store.close()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            await writer.close()
+            await asyncio.to_thread(store.close)
             if owns_client:
                 await http.aclose()
 
@@ -160,6 +167,7 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
 
     @app.get("/admin/usage")
     async def usage(request: Request):
+        await request.app.state.writer.flush()
         return {"data": await asyncio.to_thread(request.app.state.store.summary)}
 
     @app.post("/admin/refresh")
@@ -185,52 +193,53 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
             # Needed so streamed answers still carry token counts when providers support it.
             body.setdefault("stream_options", {"include_usage": True})
 
-        try:
-            result = await router.complete(body, fallback=fallback, session=session)
-        except UnknownModel as e:
-            return _error(
-                404,
-                f"unknown model or tier {str(e)!r}. Tiers: {', '.join(tier_names())}. See GET /v1/models.",
-                "invalid_request_error",
-            )
-        except Exhausted as e:
-            if e.last_body is not None and e.last_status:
-                # Every endpoint rejected the request itself: pass the explanation through.
-                return JSONResponse(e.last_body, status_code=e.last_status)
-            tried = [
-                {"provider": a.provider, "model": a.upstream_model, "kind": a.kind, "status": a.status, "error": a.error}
-                for a in e.attempts
-            ]
-            if not e.plan.candidates and e.plan.skipped:
-                retry = max(1, round(e.plan.retry_in or 1))
-                return JSONResponse(
-                    {"error": {"message": "every matching endpoint is cooling down", "type": "all_providers_busy", "retry_in_seconds": retry, "tried": tried}},
-                    status_code=503,
-                    headers={"retry-after": str(retry)},
-                )
-            if not e.plan.candidates:
+        async with request.app.state.writer.slot() as ticket:
+            try:
+                result = await router.complete(body, fallback=fallback, session=session)
+            except UnknownModel as e:
                 return _error(
-                    503, "no endpoint can serve this request (no providers loaded, or none supports the tools/images it needs)", "no_endpoint"
+                    404,
+                    f"unknown model or tier {str(e)!r}. Tiers: {', '.join(tier_names())}. See GET /v1/models.",
+                    "invalid_request_error",
                 )
-            return JSONResponse(
-                {"error": {"message": "all providers failed", "type": "all_providers_failed", "tried": tried}}, status_code=503
-            )
+            except Exhausted as e:
+                if e.last_body is not None and e.last_status:
+                    # Every endpoint rejected the request itself: pass the explanation through.
+                    return JSONResponse(e.last_body, status_code=e.last_status)
+                tried = [
+                    {"provider": a.provider, "model": a.upstream_model, "kind": a.kind, "status": a.status, "error": a.error}
+                    for a in e.attempts
+                ]
+                if not e.plan.candidates and e.plan.skipped:
+                    retry = max(1, round(e.plan.retry_in or 1))
+                    return JSONResponse(
+                        {"error": {"message": "every matching endpoint is cooling down", "type": "all_providers_busy", "retry_in_seconds": retry, "tried": tried}},
+                        status_code=503,
+                        headers={"retry-after": str(retry)},
+                    )
+                if not e.plan.candidates:
+                    return _error(
+                        503, "no endpoint can serve this request (no providers loaded, or none supports the tools/images it needs)", "no_endpoint"
+                    )
+                return JSONResponse(
+                    {"error": {"message": "all providers failed", "type": "all_providers_failed", "tried": tried}}, status_code=503
+                )
 
-        store = request.app.state.store
-        key = request.state.key
-        provider = result.candidate.endpoint.provider
-        model = result.candidate.endpoint.raw_id
-        if result.stream is not None:
-            async def tracked():
-                parser = UsageParser()
-                try:
-                    async for chunk in result.stream:
-                        parser.feed(chunk)
-                        yield chunk
-                finally:
-                    await asyncio.shield(asyncio.to_thread(store.record, key, provider, model, parser.usage, parser.done and not parser.failed))
-            return StreamingResponse(tracked(), media_type="text/event-stream", headers={**result.headers, "cache-control": "no-cache"})
-        await asyncio.to_thread(store.record, key, provider, model, (result.data or {}).get("usage"))
-        return JSONResponse(result.data, headers=result.headers)
+            key = request.state.key
+            provider = result.candidate.endpoint.provider
+            model = result.candidate.endpoint.raw_id
+            if result.stream is not None:
+                async def tracked():
+                    parser = UsageParser()
+                    try:
+                        async for chunk in result.stream:
+                            parser.feed(chunk)
+                            yield chunk
+                    finally:
+                        ticket.record(key, provider, model, parser.usage, parser.done and not parser.failed)
+                ticket.deferred = True
+                return StreamingResponse(tracked(), media_type="text/event-stream", headers={**result.headers, "cache-control": "no-cache"})
+            ticket.record(key, provider, model, (result.data or {}).get("usage"))
+            return JSONResponse(result.data, headers=result.headers)
 
     return app

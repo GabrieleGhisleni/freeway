@@ -71,7 +71,16 @@ Ogni token autorizzato può consultare il riepilogo completo, come per `/admin/s
 Il database contiene hash SHA-256 dei token, nomi, timestamp, provider, modelli e consumi; non contiene token segreti, prompt o risposte.
 Gli eventi persistono tra riavvii senza scadenza automatica. Per il backup usare SQLite backup, ad esempio
 `sqlite3 data/freeway.sqlite3 ".backup 'freeway-backup.sqlite3'"`, oppure copiare il database a server fermo.
-Le scritture dei consumi avvengono fuori dal loop asincrono; un errore di scrittura viene registrato nei log senza interrompere la risposta.
+Le scritture dei consumi avvengono in background, in transazioni da massimo 64 eventi.
+La capacità di contabilizzazione è di 1024 richieste/eventi: ogni richiesta riserva un posto prima di
+contattare il provider e lo libera dopo il commit. A capacità esaurita le nuove richieste attendono,
+senza scartare eventi o creare task di scrittura illimitati. Le risposte normalmente attendono solo
+l'accodamento; `/admin/usage` scarica gli eventi già accodati prima di leggere e lo spegnimento regolare
+scarica la coda. Un arresto forzato può perdere gli eventi non ancora committati; un errore SQLite viene
+registrato nei log senza interrompere la risposta.
+Il riepilogo legge totali aggiornati atomicamente con gli eventi, senza ricalcolare l'intero storico.
+Al primo avvio viene eseguita una migrazione una tantum dello storico esistente; Python e Rust possono
+continuare a scrivere lo stesso database, anche con la versione precedente.
 
 La prima volta, se manca la cache SQLite, viene importato il vecchio file `scores.cache_file` (default `data/scores.json`).
 Il JSON resta intatto e non viene più aggiornato; i refresh successivi sostituiscono la cache SQLite in una transazione.
@@ -136,6 +145,10 @@ Per metterli nei tier dai un voto in `models:` (stessa scala). I voti in `config
 Anche errori nascosti in una risposta 200 vengono riconosciuti. In streaming il router aspetta il primo chunk valido prima di impegnarsi;
 dopo il primo byte non può più cambiare provider. Si provano al massimo 8 endpoint per richiesta.
 Le pause sono **in memoria**: se riavvii il server le dimentica.
+Il buffer prima del primo evento streaming è limitato a 1 MiB: se il provider supera il limite,
+il router prova il successivo. Anche il parser dei consumi limita ogni riga a 1 MiB.
+La cache delle sessioni contiene al massimo 5000 elementi; quando è piena elimina le sessioni scadute
+e, se necessario, quella con scadenza più vicina.
 
 ## Modello `fake` (solo Rust)
 

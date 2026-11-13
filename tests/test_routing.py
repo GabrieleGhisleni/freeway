@@ -216,3 +216,31 @@ def test_tools_request_skips_endpoints_known_not_to_support_tools():
     img = {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]}
     assert needs(img) == (False, True)
     assert Endpoint("p", "m", "u", {"m"}).tools is None
+
+
+def test_stream_preamble_limit_falls_back():
+    fake = Fake(
+        {"a.test": ["big-500b"], "b.test": ["big-500b"]},
+        {("a.test", "big-500b"): lambda: httpx.Response(200, content=b":" * 1048577),
+         ("b.test", "big-500b"): lambda: httpx.Response(200, content=b'data: {"choices":[]}\n\ndata: [DONE]\n\n')},
+    )
+    with client(fake) as c:
+        response = chat(c, "big-500b", stream=True)
+        assert response.status_code == 200
+        assert response.headers["x-router-provider"] == "b"
+        assert len(fake.calls) == 2
+
+
+def test_session_cache_has_hard_limit():
+    from types import SimpleNamespace
+
+    from freeway.router import Router
+
+    router = Router(settings(), None, None, None)
+    model = SimpleNamespace(name="m")
+    for n in range(5100):
+        router._remember(str(n), model)
+    assert len(router._sessions) == 5000
+    assert router._sticky("5099") == "m"
+    router._remember("5099", model)
+    assert len(router._sessions) == 5000
