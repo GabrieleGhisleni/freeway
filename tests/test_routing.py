@@ -14,6 +14,7 @@ OK = {"id": "x", "object": "chat.completion", "choices": [{"index": 0, "message"
 
 def settings(**over):
     base = {
+        "database_file": ":memory:",
         "tiers": [
             {"name": "smart", "min_score": 80, "fallback": ["fast"]},
             {"name": "fast", "min_score": 0},

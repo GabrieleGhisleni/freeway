@@ -42,8 +42,40 @@ Dopo ogni modifica a `config.yaml` o `.env` **riavvia**.
 | `ARTIFICIAL_ANALYSIS_API_KEY` | punteggi di intelligenza dei modelli (senza, si usa l'ultima cache) | artificialanalysis.ai (gratis) |
 | `LOG_LEVEL` | `INFO` (default) o `DEBUG` | — |
 
-Un provider senza chiave viene **saltato** (lo dice `/admin/status`). Senza `ROUTER_TOKENS` il server è aperto a chiunque lo raggiunga.
+Un provider senza chiave viene **saltato** (lo dice `/admin/status`). Senza token configurati il server è aperto a chiunque lo raggiunga.
 Ogni token vale da solo: per dare accesso a un'app ne aggiungi uno, per toglierlo lo cancelli e riavvii. `.env` è nel `.gitignore`.
+
+## Token con nome e consumi
+
+In `.env` puoi assegnare un nome ai token delle applicazioni:
+
+```dotenv
+ROUTER_NAMED_TOKENS='{"eHub":"token-casuale-di-ehub","studio":"altro-token-casuale"}'
+```
+
+Si aggiungono a `ROUTER_TOKENS` e al vecchio `ROUTER_TOKEN`, che continuano a funzionare.
+Il client invia solo il token, come prima. Nomi e token devono essere non vuoti e ogni token nominato deve essere unico.
+Per dare un nome a un token esistente, copialo nella mappa; l'hash e lo storico restano gli stessi.
+Le modifiche richiedono un riavvio. I token usati senza nome compaiono come `unnamed`; senza autenticazione compare `anonymous`.
+
+`GET /admin/usage`, con la stessa autenticazione degli altri endpoint, restituisce `data`: consumi aggregati
+per hash del token (`key_id`), nome, provider e modello upstream. Include `requests`, `completed`,
+`prompt_tokens`, `completion_tokens`, `unknown_prompt_requests` e `unknown_completion_requests`.
+Conta le risposte upstream accettate, inclusi gli stream interrotti e ogni risposta della Decision API
+(anche quelle scartate perché inutilizzabili). Errori prima di una risposta valida, probe e modello `fake` sono esclusi.
+I conteggi sono quelli dichiarati dal provider, senza stime: se mancano, restano `null` e aumentano i contatori `unknown_*`.
+Gli stream sono completi solo se ricevono `[DONE]` senza errori. I totali sommano i valori conosciuti.
+Ogni token autorizzato può consultare il riepilogo completo, come per `/admin/status`; il tunnel blocca `/admin/*` da internet.
+
+`database_file` in `config.yaml` sceglie il database (default `data/freeway.sqlite3`). Python e Rust usano lo stesso schema.
+Il database contiene hash SHA-256 dei token, nomi, timestamp, provider, modelli e consumi; non contiene token segreti, prompt o risposte.
+Gli eventi persistono tra riavvii senza scadenza automatica. Per il backup usare SQLite backup, ad esempio
+`sqlite3 data/freeway.sqlite3 ".backup 'freeway-backup.sqlite3'"`, oppure copiare il database a server fermo.
+Le scritture dei consumi avvengono fuori dal loop asincrono; un errore di scrittura viene registrato nei log senza interrompere la risposta.
+
+La prima volta, se manca la cache SQLite, viene importato il vecchio file `scores.cache_file` (default `data/scores.json`).
+Il JSON resta intatto e non viene più aggiornato; i refresh successivi sostituiscono la cache SQLite in una transazione.
+`cache_file` identifica anche la sorgente della cache nel database: mantenere lo stesso valore passando da Python a Rust.
 
 # Deploy su Raspberry Pi
 
@@ -74,7 +106,7 @@ Quello che non si aggancia da solo si dichiara in `aliases:`. Stesso modello non
 (quantizzazione, contesto e parametri possono cambiare da provider a provider).
 
 ### 3. I tier
-Il punteggio è l'**Intelligence Index di Artificial Analysis** (0–65 circa), scaricato ogni 24 h e salvato in `data/scores.json`.
+Il punteggio è l'**Intelligence Index di Artificial Analysis** (0–65 circa), scaricato ogni 24 h e conservato in SQLite (`data/freeway.sqlite3`). Catalogo, punteggi attivi e cache dei probe restano in memoria; le richieste non leggono file o database per scegliere il modello.
 Se un modello ha più varianti (reasoning high/low) vale la più bassa. Le soglie sono in `config.yaml`:
 
 | Tier | Soglia | Riserva |

@@ -1,4 +1,4 @@
-"""Intelligence scores from Artificial Analysis, cached on disk.
+"""Intelligence scores from Artificial Analysis, held in memory and persisted in SQLite.
 
 A model with no score is *unrated*: it is never picked by a tier, only by name.
 """
@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import sqlite3
 import time
 from pathlib import Path
 
@@ -14,6 +16,7 @@ import httpx
 
 from . import normalize
 from .config import ScoresConfig
+from .storage import Store
 
 log = logging.getLogger("freeway.scores")
 
@@ -38,7 +41,8 @@ def parse(rows: list[dict]) -> dict[str, float]:
 
 
 class ScoreBook:
-    def __init__(self, cfg: ScoresConfig, client: httpx.AsyncClient):
+    def __init__(self, cfg: ScoresConfig, client: httpx.AsyncClient, store: Store | None = None):
+        self.store = store or Store(str(Path(cfg.cache_file).with_suffix(".sqlite3")))
         self.cfg = cfg
         self.client = client
         self.table: dict[str, float] = {}
@@ -51,17 +55,31 @@ class ScoreBook:
         return Path(self.cfg.cache_file)
 
     def _load_cache(self) -> None:
+        data = None
         try:
-            data = json.loads(self.cache_path.read_text())
-            self.table, self.fetched_at = data["table"], data["fetched_at"]
-        except (OSError, ValueError, KeyError):
+            data = self.store.load_scores(self.cfg.cache_file)
+        except (ValueError, sqlite3.Error) as e:
+            log.warning("could not read score cache: %s", e)
+        imported = data is None
+        try:
+            if imported:
+                data = json.loads(self.cache_path.read_text())
+            if not isinstance(data, dict) or not isinstance(data.get("table"), dict):
+                return
+            at = data.get("fetched_at")
+            if type(at) not in (int, float) or not math.isfinite(at):
+                return
+            self.table = {k: v for k, v in data["table"].items() if type(v) in (int, float) and math.isfinite(v)}
+            self.fetched_at = at
+            if imported:
+                self._save_cache()
+        except (OSError, ValueError, TypeError):
             pass
 
     def _save_cache(self) -> None:
         try:
-            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.cache_path.write_text(json.dumps({"fetched_at": self.fetched_at, "table": self.table}))
-        except OSError as e:
+            self.store.save_scores(self.cfg.cache_file, self.table, self.fetched_at)
+        except (OSError, sqlite3.Error) as e:
             log.warning("could not write score cache: %s", e)
 
     def stale(self) -> bool:

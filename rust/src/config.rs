@@ -114,6 +114,10 @@ impl ScoresConfig {
     }
 }
 
+fn d_database() -> String {
+    "data/freeway.sqlite3".into()
+}
+
 fn d_host() -> String {
     "127.0.0.1".into()
 }
@@ -147,6 +151,8 @@ fn d_scores() -> Option<ScoresConfig> {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Settings {
+    #[serde(default = "d_database")]
+    pub database_file: String,
     #[serde(default = "d_host")]
     pub host: String,
     #[serde(default = "d_port")]

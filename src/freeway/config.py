@@ -59,6 +59,7 @@ class ScoresConfig(BaseModel):
 
 
 class Settings(BaseModel):
+    database_file: str = "data/freeway.sqlite3"
     host: str = "127.0.0.1"
     port: int = 4100
     refresh_minutes: float = 30

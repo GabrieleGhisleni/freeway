@@ -18,6 +18,7 @@ from .config import Settings, load_settings
 from .health import Health
 from .router import Exhausted, Router, UnknownModel
 from .scores import ScoreBook
+from .storage import Store, UsageParser, identity, named_tokens
 
 log = logging.getLogger("freeway")
 
@@ -29,18 +30,22 @@ def _error(status: int, message: str, kind: str = "router_error", **extra) -> JS
 def load_tokens() -> list[str]:
     """Tokens accepted from callers: ROUTER_TOKENS (comma separated) plus the older ROUTER_TOKEN."""
     raw = ",".join(os.environ.get(v, "") for v in ("ROUTER_TOKENS", "ROUTER_TOKEN"))
-    return list(dict.fromkeys(t.strip() for t in raw.split(",") if t.strip()))
+    return list(dict.fromkeys([*(t.strip() for t in raw.split(",") if t.strip()), *named_tokens().values()]))
 
 
 def create_app(settings: Settings | None = None, client: httpx.AsyncClient | None = None) -> FastAPI:
     settings = settings or load_settings()
     tokens = load_tokens()
+    names = named_tokens()
     owns_client = client is None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         http = client or httpx.AsyncClient(follow_redirects=True)
-        scorebook = ScoreBook(settings.scores, http) if settings.scores else None
+        store = Store(settings.database_file)
+        store.register(identity(token, names) for token in tokens)
+        app.state.store = store
+        scorebook = ScoreBook(settings.scores, http, store) if settings.scores else None
         catalog = Catalog(settings, http, scorebook)
         health = Health()
         app.state.catalog = catalog
@@ -65,6 +70,7 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
             yield
         finally:
             task.cancel()
+            store.close()
             if owns_client:
                 await http.aclose()
 
@@ -72,6 +78,7 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
 
     @app.middleware("http")
     async def auth(request: Request, call_next):
+        given = ""
         if tokens:
             given = request.headers.get("authorization", "")
             given = given[7:] if given.lower().startswith("bearer ") else request.headers.get("x-api-key", "")
@@ -79,6 +86,7 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
             matches = [hmac.compare_digest(given.encode(), t.encode()) for t in tokens]
             if not any(matches):
                 return _error(401, "invalid or missing token", "authentication_error")
+        request.state.key = identity(given, names)
         return await call_next(request)
 
     def tier_names() -> list[str]:
@@ -150,6 +158,10 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
             },
         }
 
+    @app.get("/admin/usage")
+    async def usage(request: Request):
+        return {"data": await asyncio.to_thread(request.app.state.store.summary)}
+
     @app.post("/admin/refresh")
     async def refresh(request: Request):
         await request.app.state.catalog.refresh()
@@ -204,8 +216,21 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
                 {"error": {"message": "all providers failed", "type": "all_providers_failed", "tried": tried}}, status_code=503
             )
 
+        store = request.app.state.store
+        key = request.state.key
+        provider = result.candidate.endpoint.provider
+        model = result.candidate.endpoint.raw_id
         if result.stream is not None:
-            return StreamingResponse(result.stream, media_type="text/event-stream", headers={**result.headers, "cache-control": "no-cache"})
+            async def tracked():
+                parser = UsageParser()
+                try:
+                    async for chunk in result.stream:
+                        parser.feed(chunk)
+                        yield chunk
+                finally:
+                    await asyncio.shield(asyncio.to_thread(store.record, key, provider, model, parser.usage, parser.done and not parser.failed))
+            return StreamingResponse(tracked(), media_type="text/event-stream", headers={**result.headers, "cache-control": "no-cache"})
+        await asyncio.to_thread(store.record, key, provider, model, (result.data or {}).get("usage"))
         return JSONResponse(result.data, headers=result.headers)
 
     return app

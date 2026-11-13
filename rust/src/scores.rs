@@ -1,15 +1,16 @@
-//! Intelligence scores from Artificial Analysis, cached on disk.
+//! Intelligence scores from Artificial Analysis, loaded into memory and persisted in SQLite.
 //!
 //! A model with no score is *unrated*: it is never picked by a tier, only by name.
-//! The cache file has the same shape as the Python version's (`data/scores.json`).
+//! Legacy JSON snapshots are imported once; Python and Rust share the SQLite schema.
 
 use crate::config::ScoresConfig;
 use crate::normalize;
+use crate::storage::Store;
 use crate::util::now;
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 const URL: &str = "https://artificialanalysis.ai/api/v2/language/models/free";
@@ -43,18 +44,49 @@ pub struct ScoreBook {
     cfg: ScoresConfig,
     client: reqwest::Client,
     state: RwLock<State>,
+    store: Option<Arc<Store>>,
 }
 
 impl ScoreBook {
     pub fn new(cfg: ScoresConfig, client: reqwest::Client) -> Self {
-        let book = Self { cfg, client, state: RwLock::new(State::default()) };
+        let path = Path::new(&cfg.cache_file).with_extension("sqlite3");
+        let store = match Store::open(&path.to_string_lossy()) {
+            Ok(store) => Some(Arc::new(store)),
+            Err(e) => {
+                tracing::warn!("could not open score cache: {e}");
+                None
+            }
+        };
+        Self::build(cfg, client, store)
+    }
+
+    pub fn with_store(cfg: ScoresConfig, client: reqwest::Client, store: Arc<Store>) -> Self {
+        Self::build(cfg, client, Some(store))
+    }
+
+    fn build(cfg: ScoresConfig, client: reqwest::Client, store: Option<Arc<Store>>) -> Self {
+        let book = Self { cfg, client, state: RwLock::new(State::default()), store };
         book.load_cache();
         book
     }
 
     fn load_cache(&self) {
-        let Ok(text) = std::fs::read_to_string(&self.cfg.cache_file) else { return };
-        let Ok(data) = serde_json::from_str::<Value>(&text) else { return };
+        let cached = self.store.as_ref().and_then(|s| s.load_scores(&self.cfg.cache_file).ok().flatten());
+        let data = match cached {
+            Some(data) => data,
+            None => {
+                let Ok(text) = std::fs::read_to_string(&self.cfg.cache_file) else { return };
+                let Ok(data) = serde_json::from_str::<Value>(&text) else { return };
+                if let (Some(store), Some(at)) = (&self.store, data["fetched_at"].as_f64()) {
+                    if data["table"].is_object()
+                        && let Err(e) = store.save_scores(&self.cfg.cache_file, &data["table"], at)
+                    {
+                        tracing::warn!("could not migrate score cache: {e}");
+                    }
+                }
+                data
+            }
+        };
         let (Some(table), Some(at)) = (data["table"].as_object(), data["fetched_at"].as_f64()) else { return };
         let mut st = self.state.write().unwrap();
         st.table = table.iter().filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f))).collect();
@@ -62,11 +94,9 @@ impl ScoreBook {
     }
 
     fn save_cache(&self, table: &HashMap<String, f64>, at: f64) {
-        let path = Path::new(&self.cfg.cache_file);
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Err(e) = std::fs::write(path, json!({ "fetched_at": at, "table": table }).to_string()) {
+        if let Some(store) = &self.store
+            && let Err(e) = store.save_scores(&self.cfg.cache_file, &json!(table), at)
+        {
             tracing::warn!("could not write score cache: {e}");
         }
     }

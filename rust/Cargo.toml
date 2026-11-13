@@ -13,6 +13,8 @@ name = "freeway"
 path = "src/main.rs"
 
 [dependencies]
+rusqlite = { version = "0.38", features = ["bundled"] }
+sha2 = "0.10"
 async-stream = "0.3.6"
 axum = "0.8.9"
 bytes = "1.12.1"
