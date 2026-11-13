@@ -106,3 +106,94 @@ def test_json_cache_imported_once_and_replaced_atomically(tmp_path):
     assert b.table == {"modely": 40} and b.fetched_at == 2
     assert json.loads(legacy.read_text())["table"] == {"modelx": 33}
     store.close()
+
+
+def test_legacy_usage_migrates_once_and_old_writers_update_totals(tmp_path):
+    import sqlite3
+
+    from freeway.storage import SCHEMA
+
+    path = str(tmp_path / "legacy.sqlite3")
+    with sqlite3.connect(path) as db:
+        db.executescript(SCHEMA)
+        db.execute("INSERT INTO access_keys VALUES ('k','old')")
+        db.executemany(
+            "INSERT INTO usage_events(key_id,provider,model,prompt_tokens,completion_tokens,completed) VALUES ('k','p','m',?,?,?)",
+            [(4, None, 1), (None, 8, 0)],
+        )
+    store = Store(path)
+    (row,) = store.summary()
+    assert (row["requests"], row["prompt_tokens"], row["completion_tokens"], row["completed"]) == (2, 4, 8, 1)
+    store.close()
+    # A previous version writing only the event table still updates the totals.
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO usage_events(key_id,provider,model,completed) VALUES ('k','p','m',0)")
+    store = Store(path)
+    store.register([("k", "renamed")])
+    (row,) = store.summary()
+    assert row["requests"] == 3 and row["name"] == "renamed"
+    assert row["unknown_prompt_requests"] == row["unknown_completion_requests"] == 2
+    # Summary must not read the ever-growing event table.
+    store.db.set_authorizer(lambda action, table, *args: sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table == "usage_events" else sqlite3.SQLITE_OK)
+    assert store.summary() == [row]
+    store.close()
+
+
+async def test_writer_bounds_pending_work_and_flushes_on_close():
+    import asyncio
+    import threading
+
+    from freeway.storage import UsageWriter
+
+    entered, release = threading.Event(), threading.Event()
+    store = Store(":memory:")
+    original = store.record_batch
+    batches = []
+
+    def blocked(events):
+        batches.append(len(events))
+        entered.set()
+        assert release.wait(5)
+        original(events)
+
+    store.record_batch = blocked
+    writer = UsageWriter(store, capacity=2)
+    key = ("k", "name")
+    async with writer.slot() as ticket:
+        ticket.record(key, "p", "m", {"prompt_tokens": 3})
+    assert await asyncio.to_thread(entered.wait, 5)
+    async with writer.slot() as ticket:
+        ticket.record(key, "p", "m", None, False)
+    acquired = asyncio.Event()
+
+    async def next_request():
+        async with writer.slot() as ticket:
+            acquired.set()
+            ticket.record(key, "p", "m", {"completion_tokens": 4})
+
+    waiting = asyncio.create_task(next_request())
+    await asyncio.sleep(0)
+    assert not acquired.is_set()  # persisted writes still own the capacity
+    release.set()
+    await asyncio.wait_for(waiting, 5)
+    await writer.close()
+    (row,) = store.summary()
+    assert row["requests"] == 3 and row["prompt_tokens"] == 3 and row["completion_tokens"] == 4
+    assert all(n <= 64 for n in batches)
+    store.close()
+
+
+async def test_writer_batches_ready_events():
+    from freeway.storage import UsageWriter
+
+    store = Store(":memory:")
+    commits = []
+    store.db.set_trace_callback(lambda sql: commits.append(sql) if sql == "COMMIT" else None)
+    writer = UsageWriter(store)
+    for _ in range(130):
+        async with writer.slot() as ticket:
+            ticket.record(("k", "n"), "p", "m", None)
+    await writer.close()
+    assert store.summary()[0]["requests"] == 130
+    assert len(commits) == 3
+    store.close()

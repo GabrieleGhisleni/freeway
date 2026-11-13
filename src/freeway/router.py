@@ -7,7 +7,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 
@@ -200,8 +200,11 @@ class Router:
         if not session:
             return
         now = time.time()
-        if len(self._sessions) > 5000:
+        if len(self._sessions) >= 5000:
             self._sessions = {k: v for k, v in self._sessions.items() if v[1] > now}
+        if session not in self._sessions and len(self._sessions) >= 5000:
+            oldest = min(self._sessions, key=lambda k: self._sessions[k][1])
+            del self._sessions[oldest]
         self._sessions[session] = (model.name, now + self.settings.session_ttl_minutes * 60)
 
     def plan(
@@ -317,6 +320,8 @@ class Router:
                 chunks = resp.aiter_bytes()
                 verdict = None
                 async for chunk in chunks:
+                    if len(buf) + len(chunk) > 1048576:
+                        raise UpstreamFailure("server", 200, "stream preamble exceeds 1 MiB")
                     buf += chunk
                     verdict = _first_event(buf)
                     if verdict:

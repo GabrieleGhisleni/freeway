@@ -22,7 +22,8 @@ const URL: &str = "https://artificialanalysis.ai/api/v2/language/models/free";
 pub fn parse(rows: &[Value]) -> HashMap<String, f64> {
     let mut table: HashMap<String, f64> = HashMap::new();
     for r in rows {
-        let Some(value) = r["evaluations"]["artificial_analysis_intelligence_index"].as_f64() else { continue };
+        let Some(value) = r["evaluations"]["artificial_analysis_intelligence_index"].as_f64() else { continue;
+        };
         let Some(slug) = r["slug"].as_str().filter(|s| !s.is_empty()) else { continue };
         let k = normalize::family_key(slug);
         if k.is_empty() {
@@ -65,7 +66,8 @@ impl ScoreBook {
     }
 
     fn build(cfg: ScoresConfig, client: reqwest::Client, store: Option<Arc<Store>>) -> Self {
-        let book = Self { cfg, client, state: RwLock::new(State::default()), store };
+        let book = Self { cfg, client, state: RwLock::new(State::default()), store,
+        };
         book.load_cache();
         book
     }
@@ -87,18 +89,11 @@ impl ScoreBook {
                 data
             }
         };
-        let (Some(table), Some(at)) = (data["table"].as_object(), data["fetched_at"].as_f64()) else { return };
+        let (Some(table), Some(at)) = (data["table"].as_object(), data["fetched_at"].as_f64()) else { return;
+        };
         let mut st = self.state.write().unwrap();
         st.table = table.iter().filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f))).collect();
         st.fetched_at = Some(at);
-    }
-
-    fn save_cache(&self, table: &HashMap<String, f64>, at: f64) {
-        if let Some(store) = &self.store
-            && let Err(e) = store.save_scores(&self.cfg.cache_file, &json!(table), at)
-        {
-            tracing::warn!("could not write score cache: {e}");
-        }
     }
 
     pub fn stale(&self) -> bool {
@@ -131,7 +126,14 @@ impl ScoreBook {
         match self.fetch(&key).await {
             Ok(table) => {
                 let at = now();
-                self.save_cache(&table, at);
+                if let Some(store) = self.store.clone() {
+                    let key = self.cfg.cache_file.clone();
+                    let snapshot = json!(table);
+                    match tokio::task::spawn_blocking(move || store.save_scores(&key, &snapshot, at)).await {
+                        Ok(Ok(())) => {}
+                        result => tracing::warn!("could not write score cache: {result:?}"),
+                    }
+                }
                 tracing::info!("scores: {} models rated by Artificial Analysis", table.len());
                 let mut st = self.state.write().unwrap();
                 st.table = table;
@@ -149,7 +151,7 @@ impl ScoreBook {
 
     async fn fetch(&self, key: &str) -> Result<HashMap<String, f64>, String> {
         let url = self.cfg.url.as_deref().unwrap_or(URL);
-        let mut rows: Vec<Value> = Vec::new();
+        let mut table: HashMap<String, f64> = HashMap::new();
         let mut page = 1;
         loop {
             let sep = if url.contains('?') { '&' } else { '?' };
@@ -165,14 +167,15 @@ impl ScoreBook {
                 .map_err(|e| e.to_string())?;
             let body: Value = resp.json().await.map_err(|e| format!("bad JSON: {e}"))?;
             if let Some(data) = body["data"].as_array() {
-                rows.extend(data.iter().cloned());
+                for (name, score) in parse(data) {
+                    table.entry(name).and_modify(|v| *v = v.min(score)).or_insert(score);
+                }
             }
             if body["pagination"]["has_more"].as_bool() != Some(true) || page >= 20 {
                 break;
             }
             page += 1;
         }
-        let table = parse(&rows);
         if table.is_empty() {
             return Err("no scores in the answer".into());
         }
@@ -201,7 +204,8 @@ mod tests {
 
     #[test]
     fn parse_takes_lowest_variant_and_skips_nulls() {
-        let table = parse(&[row("model-x-high", Some(40.0)), row("model-x-low", Some(31.0)), row("model-y", None), json!({"slug": null})]);
+        let table = parse(&[row("model-x-high", Some(40.0)), row("model-x-low", Some(31.0)), row("model-y", None), json!({"slug": null}),
+        ]);
         assert_eq!(table.len(), 1);
         assert_eq!(table["modelx"], 31.0);
     }

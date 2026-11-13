@@ -692,3 +692,21 @@ async fn sqlite_cache_migration_survives_restart_and_ignores_old_json() {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(legacy);
 }
+
+
+#[tokio::test]
+async fn oversized_stream_preamble_falls_back() {
+    let oversized: &'static str = Box::leak(":".repeat(1048577).into_boxed_str());
+    let fake = Fake::new(&[("a", &["big-500b"]), ("b", &["big-500b"])])
+        .on("a", "big-500b", Reply::Raw(200, oversized, "text/event-stream"))
+        .on(
+            "b",
+            "big-500b",
+            Reply::Raw(200, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n", "text/event-stream"),
+        );
+    let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
+    let reply = h.chat_with(json!({"model":"big-500b","messages":[],"stream":true}), &[]).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["x-router-provider"], "b");
+    assert_eq!(h.fake.calls().len(), 2);
+}

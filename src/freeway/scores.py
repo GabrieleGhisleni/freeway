@@ -5,6 +5,7 @@ A model with no score is *unrated*: it is never picked by a tier, only by name.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -93,23 +94,23 @@ class ScoreBook:
             self.error = f"{self.cfg.api_key_env} is not set" + (" (using cached scores)" if self.table else "")
             return
         try:
-            rows: list[dict] = []
+            table: dict[str, float] = {}
             page = 1
             while True:
                 r = await self.client.get(URL, params={"page": page}, headers={"x-api-key": key}, timeout=30)
                 r.raise_for_status()
                 body = r.json()
-                rows += body.get("data", [])
+                for name, score in parse(body.get("data", [])).items():
+                    table[name] = min(table.get(name, score), score)
                 if not (body.get("pagination") or {}).get("has_more") or page >= 20:
                     break
                 page += 1
-            table = parse(rows)
             if not table:
                 raise ValueError("no scores in the answer")
             self.table, self.fetched_at, self.error = table, time.time(), None
-            self._save_cache()
+            await asyncio.to_thread(self._save_cache)
             log.info("scores: %d models rated by Artificial Analysis", len(table))
-        except Exception as e:  # keep serving with whatever we had
+        except (httpx.HTTPError, ValueError, TypeError, KeyError) as e:
             self.error = f"{type(e).__name__}: {e}"
             log.warning("score refresh failed: %s (keeping %d cached scores)", self.error, len(self.table))
 

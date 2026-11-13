@@ -46,20 +46,26 @@ impl Store {
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("PRAGMA journal_mode=WAL;")?;
         db.execute_batch(SCHEMA)?;
+        db.execute_batch(MIGRATION)?;
         Ok(Self(Mutex::new(db)))
     }
     pub fn register(&self, keys: &[Identity]) -> rusqlite::Result<()> {
         let mut db = self.0.lock().unwrap();
         let tx = db.transaction()?;
         for key in keys {
-            tx.execute("INSERT INTO access_keys VALUES (?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name", params![key.0, key.1])?;
+            tx.execute("INSERT INTO access_keys VALUES (?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name", params![key.0, key.1],
+            )?;
         }
         tx.commit()
     }
     pub fn record(&self, event: Event) -> rusqlite::Result<()> {
-        let count = |name: &str| event.usage[name].as_i64().filter(|v| *v >= 0);
+        self.record_batch(&[event])
+    }
+    pub fn record_batch(&self, events: &[Event]) -> rusqlite::Result<()> {
         let mut db = self.0.lock().unwrap();
         let tx = db.transaction()?;
+        for event in events {
+            let count = |name: &str| event.usage[name].as_i64().filter(|v| *v >= 0);
         tx.execute(
             "INSERT INTO access_keys VALUES (?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name",
             params![event.key.0, event.key.1],
@@ -68,6 +74,7 @@ impl Store {
             "INSERT INTO usage_events(key_id,provider,model,prompt_tokens,completion_tokens,completed) VALUES (?,?,?,?,?,?)",
             params![event.key.0, event.provider, event.model, count("prompt_tokens"), count("completion_tokens"), event.completed],
         )?;
+        }
         tx.commit()
     }
     pub fn summary(&self) -> rusqlite::Result<Value> {
@@ -96,7 +103,8 @@ impl Store {
             .optional()
     }
     pub fn save_scores(&self, key: &str, table: &Value, at: f64) -> rusqlite::Result<()> {
-        self.0.lock().unwrap().execute("INSERT INTO score_cache VALUES (?,?,?) ON CONFLICT(cache_key) DO UPDATE SET fetched_at=excluded.fetched_at,scores=excluded.scores", params![key,at,table.to_string()])?;
+        self.0.lock().unwrap().execute("INSERT INTO score_cache VALUES (?,?,?) ON CONFLICT(cache_key) DO UPDATE SET fetched_at=excluded.fetched_at,scores=excluded.scores", params![key,at,table.to_string()],
+        )?;
         Ok(())
     }
 }
@@ -109,10 +117,107 @@ pub struct Event {
     pub completed: bool,
 }
 
-pub async fn record(store: Arc<Store>, event: Event) {
-    match tokio::task::spawn_blocking(move || store.record(event)).await {
-        Ok(Ok(())) => {}
-        result => tracing::error!("could not persist usage: {result:?}"),
+// A reservation is acquired before an upstream request. It stays alive until
+// its event is committed, bounding in-flight accounting and the channel together.
+const WRITE_CAPACITY: usize = 1024;
+struct WriteJob {
+    event: Option<Event>,
+    ack: Option<tokio::sync::oneshot::Sender<()>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+pub struct UsageWriter {
+    sender: std::sync::mpsc::Sender<WriteJob>,
+    slots: Arc<tokio::sync::Semaphore>,
+}
+
+impl UsageWriter {
+    pub fn new(store: Arc<Store>) -> Self {
+        Self::with_capacity(store, WRITE_CAPACITY)
+    }
+
+    fn with_capacity(store: Arc<Store>, capacity: usize) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel::<WriteJob>();
+        std::thread::Builder::new()
+            .name("usage-writer".into())
+            .spawn(move || {
+                while let Ok(first) = receiver.recv() {
+                    let mut jobs = vec![first];
+                    while jobs.len() < 64 && jobs.last().unwrap().ack.is_none() {
+                        match receiver.try_recv() {
+                            Ok(job) => jobs.push(job),
+                            Err(_) => break,
+                        }
+                    }
+                    let events: Vec<Event> = jobs.iter_mut().filter_map(|j| j.event.take()).collect();
+                    if !events.is_empty()
+                        && let Err(e) = store.record_batch(&events)
+                    {
+                        tracing::error!("could not persist usage batch: {e}");
+                    }
+                    for mut job in jobs {
+                        let ack = job.ack.take();
+                        // Release capacity before acknowledging the flush.
+                        drop(job);
+                        if let Some(ack) = ack {
+                            let _ = ack.send(());
+                        }
+                    }
+                }
+            })
+            .expect("cannot start usage writer");
+        Self {
+            sender,
+            slots: Arc::new(tokio::sync::Semaphore::new(capacity)),
+        }
+    }
+
+    pub async fn reserve(&self) -> UsageTicket {
+        let permit = self.slots.clone().acquire_owned().await.expect("usage writer closed");
+        UsageTicket {
+            sender: self.sender.clone(),
+            permit,
+        }
+    }
+
+    /// Wait for already enqueued events, including at graceful shutdown.
+    pub async fn flush(&self) {
+        let ticket = self.reserve().await;
+        let (ack, done) = tokio::sync::oneshot::channel();
+        if ticket
+            .sender
+            .send(WriteJob {
+                event: None,
+                ack: Some(ack),
+                _permit: ticket.permit,
+            })
+            .is_ok()
+        {
+            let _ = done.await;
+        }
+    }
+}
+
+pub struct UsageTicket {
+    sender: std::sync::mpsc::Sender<WriteJob>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+}
+impl UsageTicket {
+    pub fn record(self, mut event: Event) {
+        // Retain counters only, never the full upstream usage object.
+        event.usage = json!({"prompt_tokens": event.usage["prompt_tokens"].as_i64(),
+                            "completion_tokens": event.usage["completion_tokens"].as_i64()});
+        if self
+            .sender
+            .send(WriteJob {
+                event: Some(event),
+                ack: None,
+                _permit: self.permit,
+            })
+            .is_err()
+        {
+            tracing::error!("usage writer stopped before event could be queued");
+        }
     }
 }
 
@@ -157,19 +262,16 @@ impl UsageParser {
 pub struct StreamAccounting {
     pub parser: UsageParser,
     pub event: Option<Event>,
-    pub store: Arc<Store>,
+    pub ticket: Option<UsageTicket>,
 }
 impl Drop for StreamAccounting {
     fn drop(&mut self) {
         if let Some(mut event) = self.event.take() {
             event.usage = self.parser.usage.take();
             event.completed = self.parser.done && !self.parser.failed;
-            let store = self.store.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) = store.record(event) {
-                    tracing::error!("could not persist usage: {e}");
+            if let Some(ticket) = self.ticket.take() {
+                ticket.record(event);
                 }
-            });
         }
     }
 }
@@ -183,12 +285,35 @@ CREATE TABLE IF NOT EXISTS usage_events (
 CREATE INDEX IF NOT EXISTS usage_key ON usage_events(key_id);
 CREATE TABLE IF NOT EXISTS score_cache (cache_key TEXT PRIMARY KEY, fetched_at REAL NOT NULL, scores TEXT NOT NULL);
 "#;
-const SUMMARY: &str = r#"SELECT k.id AS key_id, k.name, u.provider, u.model, COUNT(*) AS requests,
-SUM(u.completed) AS completed, COUNT(*)-COUNT(u.prompt_tokens) AS unknown_prompt_requests,
-COUNT(*)-COUNT(u.completion_tokens) AS unknown_completion_requests,
-SUM(u.prompt_tokens) AS prompt_tokens, SUM(u.completion_tokens) AS completion_tokens
-FROM usage_events u JOIN access_keys k ON k.id=u.key_id
-GROUP BY k.id,k.name,u.provider,u.model ORDER BY k.name,k.id,u.provider,u.model"#;
+const MIGRATION: &str = r#"BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS storage_migrations (name TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS usage_totals (
+ key_id TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+ requests INTEGER NOT NULL, completed INTEGER NOT NULL,
+ unknown_prompt_requests INTEGER NOT NULL, unknown_completion_requests INTEGER NOT NULL,
+ prompt_tokens INTEGER, completion_tokens INTEGER,
+ PRIMARY KEY(key_id,provider,model));
+INSERT INTO usage_totals
+SELECT key_id,provider,model,COUNT(*),SUM(completed),
+ COUNT(*)-COUNT(prompt_tokens),COUNT(*)-COUNT(completion_tokens),SUM(prompt_tokens),SUM(completion_tokens)
+FROM usage_events WHERE NOT EXISTS (SELECT 1 FROM storage_migrations WHERE name='usage_totals_v1')
+GROUP BY key_id,provider,model;
+CREATE TRIGGER IF NOT EXISTS usage_totals_insert AFTER INSERT ON usage_events BEGIN
+ INSERT INTO usage_totals VALUES (NEW.key_id,NEW.provider,NEW.model,1,NEW.completed,
+ NEW.prompt_tokens IS NULL,NEW.completion_tokens IS NULL,NEW.prompt_tokens,NEW.completion_tokens)
+ ON CONFLICT(key_id,provider,model) DO UPDATE SET
+ requests=requests+1, completed=completed+excluded.completed,
+ unknown_prompt_requests=unknown_prompt_requests+excluded.unknown_prompt_requests,
+ unknown_completion_requests=unknown_completion_requests+excluded.unknown_completion_requests,
+ prompt_tokens=CASE WHEN excluded.prompt_tokens IS NULL THEN usage_totals.prompt_tokens ELSE COALESCE(usage_totals.prompt_tokens,0)+excluded.prompt_tokens END,
+ completion_tokens=CASE WHEN excluded.completion_tokens IS NULL THEN usage_totals.completion_tokens ELSE COALESCE(usage_totals.completion_tokens,0)+excluded.completion_tokens END;
+END;
+INSERT OR IGNORE INTO storage_migrations VALUES ('usage_totals_v1');
+COMMIT;"#;
+const SUMMARY: &str = r#"SELECT k.id AS key_id, k.name, u.provider, u.model,u.requests,u.completed,
+u.unknown_prompt_requests,u.unknown_completion_requests,u.prompt_tokens,u.completion_tokens
+FROM usage_totals u JOIN access_keys k ON k.id=u.key_id
+ORDER BY k.name,k.id,u.provider,u.model"#;
 
 #[cfg(test)]
 mod tests {
@@ -252,9 +377,10 @@ mod tests {
     #[tokio::test]
     async fn dropped_stream_is_accounted_as_incomplete() {
         let store = Arc::new(Store::open(":memory:").unwrap());
+        let writer = UsageWriter::new(store.clone());
         let guard = StreamAccounting {
             parser: UsageParser::default(),
-            store: store.clone(),
+            ticket: Some(writer.reserve().await),
             event: Some(Event {
                 key: identity("secret", &BTreeMap::new()),
                 provider: "p".into(),
@@ -264,13 +390,63 @@ mod tests {
             }),
         };
         drop(guard);
-        for _ in 0..100 {
-            if store.summary().unwrap()["data"].as_array().unwrap().len() == 1 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        writer.flush().await;
         assert_eq!(store.summary().unwrap()["data"][0]["completed"], 0);
         assert_eq!(store.summary().unwrap()["data"][0]["prompt_tokens"], Value::Null);
+    }
+
+    #[test]
+    fn legacy_events_backfill_once_and_old_writers_update_totals() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(
+            "INSERT INTO access_keys VALUES ('k','old');
+            INSERT INTO usage_events(key_id,provider,model,prompt_tokens,completed) VALUES ('k','p','m',4,1);
+            INSERT INTO usage_events(key_id,provider,model,completion_tokens,completed) VALUES ('k','p','m',8,0);",
+        )
+        .unwrap();
+        db.execute_batch(MIGRATION).unwrap();
+        db.execute_batch("INSERT INTO usage_events(key_id,provider,model,completed) VALUES ('k','p','m',0);")
+            .unwrap();
+        db.execute_batch(MIGRATION).unwrap();
+        let store = Store(Mutex::new(db));
+        store.register(&[Identity("k".into(), "renamed".into())]).unwrap();
+        let data = store.summary().unwrap();
+        let row = &data["data"][0];
+        assert_eq!(row["requests"], 3);
+        assert_eq!(row["name"], "renamed");
+        assert_eq!(row["prompt_tokens"], 4);
+        assert_eq!(row["completion_tokens"], 8);
+        assert_eq!(row["unknown_prompt_requests"], 2);
+        assert_eq!(row["unknown_completion_requests"], 2);
+        // The summary continues to work when access to historical events is removed.
+        store.0.lock().unwrap().execute_batch("DROP TABLE usage_events;").unwrap();
+        assert_eq!(store.summary().unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn writer_retains_capacity_until_commit_and_flushes() {
+        let store = Arc::new(Store::open(":memory:").unwrap());
+        let writer = UsageWriter::with_capacity(store.clone(), 2);
+        let lock = store.0.lock().unwrap();
+        for _ in 0..2 {
+            writer.reserve().await.record(Event {
+                key: Identity("k".into(), "n".into()),
+                provider: "p".into(),
+                model: "m".into(),
+                usage: json!({"prompt_tokens":3}),
+                completed: true,
+            });
+        }
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), writer.reserve()).await.is_err());
+        drop(lock);
+        writer.flush().await;
+        let data = store.summary().unwrap();
+        assert_eq!(data["data"][0]["requests"], 2);
+        assert_eq!(data["data"][0]["prompt_tokens"], 6);
+        // Abandoning a reservation (upstream error/cancellation) frees it.
+        let ticket = writer.reserve().await;
+        drop(ticket);
+        assert_eq!(writer.slots.available_permits(), 2);
     }
 }
