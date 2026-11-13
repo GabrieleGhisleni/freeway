@@ -112,7 +112,8 @@ async fn start(fake: Fake, models_yaml: &str, tokens: &[&str]) -> Harness {
     let fake = Arc::new(fake);
     let port = serve_fake(fake.clone()).await;
     let yaml = format!(
-        "scores: null
+        "database_file: ':memory:'
+scores: null
 health_file: null
 tiers:
   - {{ name: smart, min_score: 80, fallback: [fast] }}
@@ -441,6 +442,7 @@ async fn scores_follow_pagination_and_write_a_cache() {
     let port = serve_scores().await;
     let cache = temp_cache("paged");
     let _ = std::fs::remove_file(&cache);
+    let _ = std::fs::remove_file(std::path::Path::new(&cache).with_extension("sqlite3"));
     let book = ScoreBook::new(scores_cfg(port, "aa", &cache), build_client(10.0));
     assert!(book.stale());
     book.ensure_fresh().await;
@@ -450,6 +452,7 @@ async fn scores_follow_pagination_and_write_a_cache() {
     assert_eq!(again.entries(), 3);
     assert!(!again.stale());
     let _ = std::fs::remove_file(&cache);
+    let _ = std::fs::remove_file(std::path::Path::new(&cache).with_extension("sqlite3"));
 }
 
 #[tokio::test]
@@ -464,6 +467,7 @@ async fn failed_refresh_keeps_cached_scores() {
     assert_eq!(book.entries(), 1);
     assert!(book.error().is_some());
     let _ = std::fs::remove_file(&cache);
+    let _ = std::fs::remove_file(std::path::Path::new(&cache).with_extension("sqlite3"));
 }
 
 #[tokio::test]
@@ -612,7 +616,8 @@ async fn probe_keeps_only_listed_models_that_answer_a_chat() {
     );
     let port = serve_fake(fake.clone()).await;
     let yaml = format!(
-        "scores: null
+        "database_file: ':memory:'
+scores: null
 health_file: null
 tiers: [{{ name: fast, min_score: 0 }}]
 providers:
@@ -676,4 +681,73 @@ async fn unrated_models_are_the_last_resort_of_a_tier() {
     let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
     let r = h.chat_with(json!({ "model": "fast", "messages": [{ "role": "user", "content": "hi" }] }), &[("x-router-fallback", "none")]).await;
     assert_eq!(r.status, 503);
+}
+
+#[tokio::test]
+async fn usage_is_authenticated_and_tracks_json_and_streams() {
+    let fake = Fake::new(&[("a", &["big-500b"]), ("b", &[])]).on(
+        "a",
+        "big-500b",
+        Reply::Json(200, json!({"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":4,"completion_tokens":9}}), vec![]),
+    );
+    let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
+    assert_eq!(h.get("/admin/usage", None).await.status, StatusCode::UNAUTHORIZED);
+    h.chat_with(json!({"model":"big-500b","messages":[]}), &[]).await;
+    h.fake.behaviour.lock().unwrap().insert(("a".into(),"big-500b".into()), Reply::Raw(200, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n", "text/event-stream"));
+    let stream = h.chat_with(json!({"model":"big-500b","messages":[],"stream":true}), &[]).await;
+    assert_eq!(stream.status, StatusCode::OK);
+    let summary = h.get("/admin/usage", Some("secret")).await.json();
+    let rows = summary["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["requests"], 2);
+    assert_eq!(rows[0]["prompt_tokens"], 6);
+    assert_eq!(rows[0]["completion_tokens"], 12);
+    assert_eq!(rows[0]["completed"], 2);
+    assert!(!summary.to_string().contains("secret"));
+}
+
+#[tokio::test]
+async fn sqlite_cache_migration_survives_restart_and_ignores_old_json() {
+    use freeway::storage::{Store, Event, identity};
+    let legacy = temp_cache("migration");
+    let path = std::path::Path::new(&legacy).with_extension("sqlite3");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&legacy, json!({"fetched_at":1.0,"table":{"modelx":33.0}}).to_string()).unwrap();
+    let cfg = ScoresConfig { cache_file: legacy.clone(), ..Default::default() };
+    {
+        let store = Arc::new(Store::open(path.to_str().unwrap()).unwrap());
+        let book = ScoreBook::with_store(cfg.clone(), build_client(1.0), store.clone());
+        assert_eq!(book.entries(), 1);
+        store.save_scores(&legacy, &json!({"modely":40.0}), 2.0).unwrap();
+        store.record(Event { key:identity("secret", &Default::default()), provider:"p".into(), model:"m".into(), usage:json!({"prompt_tokens":8}), completed:true }).unwrap();
+    }
+    let store = Arc::new(Store::open(path.to_str().unwrap()).unwrap());
+    let book = ScoreBook::with_store(cfg, build_client(1.0), store.clone());
+    assert_eq!(book.fetched_at(), Some(2.0));
+    assert_eq!(book.lookup(&["modely".to_string()].into_iter().collect()), Some(40.0));
+    assert_eq!(book.lookup(&["modelx".to_string()].into_iter().collect()), None);
+    assert_eq!(store.summary().unwrap()["data"][0]["prompt_tokens"], 8);
+    assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(&legacy).unwrap()).unwrap()["table"]["modelx"],33.0);
+    drop(book);
+    drop(store);
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(legacy);
+}
+
+
+#[tokio::test]
+async fn oversized_stream_preamble_falls_back() {
+    let oversized: &'static str = Box::leak(":".repeat(1048577).into_boxed_str());
+    let fake = Fake::new(&[("a", &["big-500b"]), ("b", &["big-500b"])])
+        .on("a", "big-500b", Reply::Raw(200, oversized, "text/event-stream"))
+        .on(
+            "b",
+            "big-500b",
+            Reply::Raw(200, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n", "text/event-stream"),
+        );
+    let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
+    let reply = h.chat_with(json!({"model":"big-500b","messages":[],"stream":true}), &[]).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["x-router-provider"], "b");
+    assert_eq!(h.fake.calls().len(), 2);
 }

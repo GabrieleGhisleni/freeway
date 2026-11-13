@@ -1,0 +1,9 @@
+$kind: http-request
+description: "Solo da dentro il Pi: dal tunnel pubblico /admin/* risponde 404. Consumi persistenti aggregati per hash del token, nome, provider e modello upstream. Include richieste, risposte complete, token dichiarati dal provider e contatori dei consumi sconosciuti. Attende le scritture già accodate prima di leggere."
+url: "{{adminUrl}}/admin/usage"
+method: GET
+auth:
+  type: bearer
+  credentials:
+    token: "{{token}}"
+order: 6200

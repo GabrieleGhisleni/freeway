@@ -101,6 +101,7 @@ Tutti richiedono il token, compreso `/health`.
 | `GET /v1/models/{id}` | un solo tier o modello (anche `<provider>/<id>`); 404 `model_not_found`. |
 | `GET /admin/status` (*) | provider attivi/saltati, punteggi, modelli per tier con pause ed errori, elenco `unrated` |
 | `GET /admin/info` (*) | pause attive (chi, perché, fino a quando), riuscite/fallite per modello e per provider, errori per tipo. |
+| `GET /admin/usage` (*) | consumi persistenti per token, provider e modello; dettagli in [README](../README.md#token-con-nome-e-consumi) |
 | `POST /admin/refresh` (*) | rilegge subito gli elenchi dei provider |
 | `GET /health` | `{"status":"ok"}` |
 | `POST /v1/systemone` | Decision API (vedi [README](../README.md#decision-api)) |

@@ -16,11 +16,11 @@ deploy/env.sh keys|set|new-token|edit # .env del Pi (chiavi e ROUTER_TOKENS)
 
 - `deploy.sh` accetta solo `main` pulito (altrimenti `--force`). Committa **prima** di fare deploy.
 - Dopo il restart il server impiega circa **un minuto** a mettersi in ascolto (sonda i modelli NVIDIA): lo script aspetta fino a 90 s. Se dice "did not come up", guarda `ssh rpi 'journalctl -u freeway -n 30'` prima di allarmarti.
-- Il Pi tiene stato in `~/freeway/data/` (`scores.json`, `health.json`). `deploy.sh` non lo tocca; il servizio può scrivere solo lì.
+- Il Pi tiene stato in `~/freeway/data/` (`freeway.sqlite3`, `health.json`, cache legacy `scores.json`). `deploy.sh` non lo tocca; il servizio può scrivere solo lì.
 
 ## Mappa del codice (`rust/src/`)
 
-`config.rs` (config.yaml) · `catalog.rs` (scoperta e fusione dei modelli) · `normalize.rs` · `scores.rs` (Artificial Analysis) · `router.rs` (scelta, fallback, chiamate) · `health.rs` (pause, contatori, persistenza) · `app.rs` (HTTP) · `systemone.rs` (Decision API) · `fake.rs` · `http.rs` · `util.rs`.
+`config.rs` (config.yaml) · `catalog.rs` (scoperta e fusione dei modelli) · `normalize.rs` · `scores.rs` (Artificial Analysis) · `router.rs` (scelta, fallback, chiamate) · `health.rs` (pause, contatori, persistenza) · `app.rs` (HTTP) · `systemone.rs` (Decision API) · `storage.rs` (SQLite, consumi e cache punteggi) · `fake.rs` · `http.rs` · `util.rs`.
 
 ## Regole di progetto
 

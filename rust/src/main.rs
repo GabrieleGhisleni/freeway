@@ -52,7 +52,7 @@ async fn main() -> ExitCode {
         }
     };
     let client = http::build_client(settings.connect_timeout);
-    let (router, catalog, health) = app::build_app_with_health(settings.clone(), app::load_tokens(), client).await;
+    let (router, catalog, health, writer) = app::build_app_with_shutdown(settings.clone(), app::load_tokens(), client).await;
     app::spawn_refresh_loop(catalog, settings.refresh_minutes);
 
     let addr = (host.unwrap_or_else(|| settings.host.clone()), port.unwrap_or(settings.port));
@@ -64,9 +64,10 @@ async fn main() -> ExitCode {
         }
     };
     tracing::info!("listening on http://{}:{}", addr.0, addr.1);
-    let served = axum::serve(listener, router).with_graceful_shutdown(shutdown_signal()).await;
+    let result = axum::serve(listener, router).with_graceful_shutdown(shutdown_signal()).await;
     health.save();
-    if let Err(e) = served {
+    writer.flush().await;
+    if let Err(e) = result {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }

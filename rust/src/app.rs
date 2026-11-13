@@ -6,8 +6,10 @@ use crate::fake;
 use crate::health::Health;
 use crate::router::{Attempt, CompleteError, Router, SuccessBody};
 use crate::scores::ScoreBook;
+use crate::storage::{self, Event, Identity, Store, StreamAccounting, UsageParser, UsageWriter};
 use crate::systemone;
 use crate::util::{now, truncate, truthy};
+use axum::Extension;
 use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, Request, State};
@@ -15,7 +17,9 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -27,12 +31,21 @@ pub struct AppState {
     health: Arc<Health>,
     router: Arc<Router>,
     tokens: Arc<Vec<String>>,
+    names: Arc<BTreeMap<String, String>>,
+    store: Arc<Store>,
+    writer: Arc<UsageWriter>,
 }
 
 /// Tokens accepted from callers: ROUTER_TOKENS (comma separated) plus the older ROUTER_TOKEN.
 pub fn load_tokens() -> Vec<String> {
     let raw = ["ROUTER_TOKENS", "ROUTER_TOKEN"].iter().map(|v| std::env::var(v).unwrap_or_default()).collect::<Vec<_>>().join(",");
-    parse_tokens(&raw)
+    let mut tokens = parse_tokens(&raw);
+    for token in storage::named_tokens().values() {
+        if !tokens.contains(token) {
+            tokens.push(token.clone());
+        }
+    }
+    tokens
 }
 
 /// Comma separated list: trimmed, empties dropped, duplicates removed, order kept.
@@ -46,20 +59,19 @@ pub fn parse_tokens(raw: &str) -> Vec<String> {
     tokens
 }
 
-
 /// Builds the app and loads the catalog once before returning.
 pub async fn build_app(settings: Arc<Settings>, tokens: Vec<String>, client: reqwest::Client) -> (axum::Router, Arc<Catalog>) {
-    let (app, catalog, _) = build_app_with_health(settings, tokens, client).await;
+    let (app, catalog, _, _) = build_app_with_shutdown(settings, tokens, client).await;
     (app, catalog)
 }
 
-/// Same as `build_app`, also returning the health book so the caller can flush it on shutdown.
-pub async fn build_app_with_health(
-    settings: Arc<Settings>,
-    tokens: Vec<String>,
-    client: reqwest::Client,
-) -> (axum::Router, Arc<Catalog>, Arc<Health>) {
-    let scores = settings.scores.clone().map(|cfg| Arc::new(ScoreBook::new(cfg, client.clone())));
+/// The binary retains health and accounting so graceful shutdown persists both.
+pub async fn build_app_with_shutdown(settings: Arc<Settings>, tokens: Vec<String>, client: reqwest::Client) -> (axum::Router, Arc<Catalog>, Arc<Health>, Arc<UsageWriter>) {
+    let store = Arc::new(Store::open(&settings.database_file).expect("cannot open SQLite database"));
+    let writer = Arc::new(UsageWriter::new(store.clone()));
+    let names = Arc::new(storage::named_tokens());
+    store.register(&tokens.iter().map(|token| storage::identity(token, &names)).collect::<Vec<_>>()).expect("cannot register access key names");
+    let scores = settings.scores.clone().map(|cfg| Arc::new(ScoreBook::with_store(cfg, client.clone(), store.clone())));
     let catalog = Arc::new(Catalog::new(settings.clone(), client.clone(), scores));
     let health = Arc::new(settings.health_file.as_deref().map_or_else(Health::new, Health::with_file));
     let router = Arc::new(Router::new(settings.clone(), catalog.clone(), health.clone(), client));
@@ -70,7 +82,9 @@ pub async fn build_app_with_health(
     }
     catalog.refresh().await;
 
-    let state = AppState { settings, catalog: catalog.clone(), health: health.clone(), router, tokens: Arc::new(tokens) };
+    let state = AppState { settings, catalog: catalog.clone(), health: health.clone(), router, tokens: Arc::new(tokens), names, store,
+        writer: writer.clone(),
+    };
     let app = axum::Router::new()
         .route("/health", get(health_check))
         .route("/v1/models", get(list_models))
@@ -81,10 +95,11 @@ pub async fn build_app_with_health(
         .route("/api/alpha/decisions", post(systemone))
         .route("/admin/status", get(status))
         .route("/admin/info", get(info))
+        .route("/admin/usage", get(usage))
         .route("/admin/refresh", post(refresh))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);
-    (app, catalog, health)
+    (app, catalog, health, writer)
 }
 
 /// Re-reads the provider lists every `minutes` minutes, forever.
@@ -103,22 +118,32 @@ fn error_response(status: StatusCode, message: impl Into<String>, kind: &str) ->
 
 fn bearer_or_key(headers: &HeaderMap) -> String {
     let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).unwrap_or("");
-    if auth.len() >= 7 && auth[..7].eq_ignore_ascii_case("bearer ") {
+    if auth.get(..7).is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer ")) {
         return auth[7..].to_string();
     }
     headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
 }
 
-async fn auth(State(st): State<AppState>, req: Request, next: Next) -> Response {
+async fn auth(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
+    let mut given = String::new();
     if !st.tokens.is_empty() {
-        let given = bearer_or_key(req.headers());
+        given = bearer_or_key(req.headers());
         // Compare against every token (no early exit) so timing does not reveal which one was close.
         let ok = st.tokens.iter().fold(false, |acc, t| acc | bool::from(given.as_bytes().ct_eq(t.as_bytes())));
         if !ok {
             return error_response(StatusCode::UNAUTHORIZED, "invalid or missing token", "authentication_error");
         }
     }
+    req.extensions_mut().insert(storage::identity(&given, &st.names));
     next.run(req).await
+}
+
+async fn usage(State(st): State<AppState>) -> Response {
+    st.writer.flush().await;
+    match tokio::task::spawn_blocking(move || st.store.summary()).await {
+        Ok(Ok(data)) => Json(data).into_response(),
+        _ => error_response(StatusCode::INTERNAL_SERVER_ERROR, "cannot read usage", "storage_error"),
+    }
 }
 
 async fn health_check() -> Json<Value> {
@@ -288,9 +313,10 @@ fn routing_headers(headers: &HeaderMap) -> Result<(String, Option<String>), &'st
     Ok((fallback, header_str("x-router-session")))
 }
 
-async fn chat(State(st): State<AppState>, headers: HeaderMap, raw: Bytes) -> Response {
+async fn chat(State(st): State<AppState>, Extension(key): Extension<Identity>, headers: HeaderMap, raw: Bytes) -> Response {
     let invalid = |msg: &str| error_response(StatusCode::BAD_REQUEST, msg, "invalid_request_error");
-    let Ok(mut body) = serde_json::from_slice::<Value>(&raw) else { return invalid("body is not valid JSON") };
+    let Ok(mut body) = serde_json::from_slice::<Value>(&raw) else { return invalid("body is not valid JSON");
+    };
     if !body.is_object() || !truthy(body.get("model")) || !body["messages"].is_array() {
         return invalid("`model` and `messages` are required");
     }
@@ -306,17 +332,43 @@ async fn chat(State(st): State<AppState>, headers: HeaderMap, raw: Bytes) -> Res
         return fake_chat(&body);
     }
 
+    let ticket = st.writer.reserve().await;
     match st.router.complete(body, &fallback, session.as_deref()).await {
         Ok(success) => {
             let extra = success.headers();
+            let event = Event {
+                key,
+                provider: success.candidate.endpoint.provider.clone(),
+                model: success.candidate.endpoint.raw_id.clone(),
+                usage: Value::Null,
+                completed: true,
+            };
             match success.body {
-                SuccessBody::Json(data) => with_headers(Json(data).into_response(), extra),
-                SuccessBody::Stream(stream) => {
+                SuccessBody::Json(data) => {
+                    ticket.record(Event { usage: data["usage"].clone(), ..event });
+                    with_headers(Json(data).into_response(), extra)
+                }
+                SuccessBody::Stream(mut stream) => {
+                    let mut accounting = StreamAccounting { parser: UsageParser::default(), event: Some(event),
+                        ticket: Some(ticket),
+                    };
+                    let tracked = async_stream::stream! {
+                        while let Some(chunk) = stream.next().await {
+                            if let Ok(bytes) = &chunk { accounting.parser.feed(bytes); }
+                            yield chunk;
+                        }
+                        // Queue before EOF; Drop also queues on cancellation.
+                        if let Some(mut event) = accounting.event.take() {
+                            event.usage = accounting.parser.usage.take();
+                            event.completed = accounting.parser.done && !accounting.parser.failed;
+                            if let Some(ticket) = accounting.ticket.take() { ticket.record(event); }
+                        }
+                    };
                     let resp = Response::builder()
                         .status(StatusCode::OK)
                         .header(header::CONTENT_TYPE, "text/event-stream")
                         .header(header::CACHE_CONTROL, "no-cache")
-                        .body(Body::from_stream(stream))
+                        .body(Body::from_stream(tracked))
                         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
                     with_headers(resp, extra)
                 }
@@ -345,9 +397,10 @@ fn fake_chat(body: &Value) -> Response {
 const DECISION_TRIES: usize = 3;
 
 /// `POST /v1/systemone` (alias `/api/alpha/decisions`): answer typed questions about a state.
-async fn systemone(State(st): State<AppState>, headers: HeaderMap, raw: Bytes) -> Response {
+async fn systemone(State(st): State<AppState>, Extension(key): Extension<Identity>, headers: HeaderMap, raw: Bytes) -> Response {
     let invalid = |msg: &str| error_response(StatusCode::BAD_REQUEST, msg, "invalid_request_error");
-    let Ok(body) = serde_json::from_slice::<Value>(&raw) else { return invalid("body is not valid JSON") };
+    let Ok(body) = serde_json::from_slice::<Value>(&raw) else { return invalid("body is not valid JSON");
+    };
     let request = match systemone::parse_request(&body) {
         Ok(r) => r,
         Err(msg) => return invalid(&msg),
@@ -361,12 +414,20 @@ async fn systemone(State(st): State<AppState>, headers: HeaderMap, raw: Bytes) -
     let mut last_problem = String::new();
     for _ in 0..DECISION_TRIES {
         let chat_body = json!({ "model": request.model, "messages": messages, "temperature": 0, "stream": false });
+        let ticket = st.writer.reserve().await;
         let success = match st.router.complete(chat_body, &fallback, session.as_deref()).await {
             Ok(s) => s,
             Err(e) => return complete_error(&st, e),
         };
         let extra = success.headers();
         let SuccessBody::Json(data) = &success.body else { continue };
+        ticket.record(Event {
+                key: key.clone(),
+                provider: success.candidate.endpoint.provider.clone(),
+                model: success.candidate.endpoint.raw_id.clone(),
+                usage: data["usage"].clone(),
+                completed: true,
+            });
         let answers = systemone::completion_text(data)
             .ok_or_else(|| "empty answer".to_string())
             .and_then(|text| systemone::read_answers(&request.questions, &text));
@@ -463,7 +524,11 @@ fn exhausted_message(attempts: &[Attempt]) -> String {
         }
     }
     let detail: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
-    format!("all {} endpoints tried failed ({}). Details in error.tried; GET /admin/status shows the pauses.", attempts.len(), detail.join(", "))
+    format!(
+        "all {} endpoints tried failed ({}). Details in error.tried; GET /admin/status shows the pauses.",
+        attempts.len(),
+        detail.join(", ")
+    )
 }
 
 #[cfg(test)]

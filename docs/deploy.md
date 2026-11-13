@@ -105,7 +105,7 @@ Variabili: `DEPLOY_HOST` (default `rpi`), `DEPLOY_DIR` (default `freeway`, relat
 Sul Pi, `~/freeway/VERSION` dice quale commit è in esecuzione.
 
 `config.yaml` viene **sovrascritto** a ogni deploy con quello del repo: le modifiche alla configurazione si fanno nel repo, non sul Pi.
-Un deploy non cancella le pause dei provider né altro stato in memoria: il riavvio le dimentica (vedi il [README](../README.md#5-quando-un-provider-non-risponde)).
+Un deploy conserva le pause e i contatori in `data/health.json` e i consumi e la cache punteggi in `data/freeway.sqlite3`. Lo spegnimento regolare salva la salute e scarica la coda dei consumi prima di terminare (vedi il [README](../README.md#token-con-nome-e-consumi)).
 
 ## Operazioni
 

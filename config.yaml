@@ -3,6 +3,7 @@
 
 host: 127.0.0.1
 port: 4100
+database_file: data/freeway.sqlite3  # usage history and persistent score cache
 refresh_minutes: 30        # how often provider model lists are re-read
 first_token_timeout: 30    # seconds to wait for the first streamed chunk before trying the next provider
 health_file: data/health.json  # pauses (429 + Retry-After) and ok/failed counters survive restarts; null = memory only
@@ -16,7 +17,7 @@ max_attempts: 8            # endpoints tried per request before giving up
 scores:
   api_key_env: ARTIFICIAL_ANALYSIS_API_KEY
   refresh_hours: 24
-  cache_file: data/scores.json
+  cache_file: data/scores.json  # legacy JSON import path and cache identity; no longer written
 
 # Intelligence tiers over that index. Calling model="smart" tries the best
 # models in that tier first, then falls through `fallback`. The tiers are
