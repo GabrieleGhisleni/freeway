@@ -173,6 +173,7 @@ fn model_object(m: &Model, id: &str, created: i64) -> Value {
 async fn list_models(State(st): State<AppState>) -> Json<Value> {
     let created = now() as i64;
     let mut data: Vec<Value> = st.settings.tiers.iter().map(|t| tier_object(&t.name, created)).collect();
+    data.extend(st.settings.variants.iter().map(|v| tier_object(&v.name, created)));
     data.extend(st.catalog.all_models().iter().map(|m| model_object(m, &m.name, created)));
     data.push(fake_object(created));
     Json(json!({ "object": "list", "data": data }))
@@ -182,7 +183,7 @@ async fn list_models(State(st): State<AppState>) -> Json<Value> {
 /// The id may contain slashes, as OpenRouter ids do.
 async fn get_model(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     let created = now() as i64;
-    if st.settings.tier(&id).is_some() {
+    if st.settings.tier(&id).is_some() || st.settings.variant(&id).is_some() {
         return Json(tier_object(&id, created)).into_response();
     }
     if id == fake::MODEL {

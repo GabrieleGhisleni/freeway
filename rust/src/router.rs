@@ -501,7 +501,11 @@ impl Router {
     }
 
     pub async fn complete(&self, mut body: Value, fallback: &str, session: Option<&str>) -> Result<Success, CompleteError> {
-        let requested = body["model"].as_str().unwrap_or("").to_string();
+        let mut requested = body["model"].as_str().unwrap_or("").to_string();
+        if let Some(v) = self.settings.variant(&requested) {
+            body["reasoning_effort"] = json!(v.reasoning_effort);
+            requested = v.tier.clone();
+        }
         let stream = truthy(body.get("stream"));
         let (needs_tools, needs_vision) = needs(&body);
         let plan = self.plan(&requested, fallback, session, needs_tools, needs_vision).map_err(CompleteError::UnknownModel)?;

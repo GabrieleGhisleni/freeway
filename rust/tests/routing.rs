@@ -35,6 +35,7 @@ struct Fake {
     listings: HashMap<String, Vec<String>>,
     behaviour: Mutex<HashMap<(String, String), Reply>>,
     calls: Mutex<Vec<(String, String)>>,
+    efforts: Mutex<Vec<Option<String>>>,
 }
 
 impl Fake {
@@ -61,6 +62,7 @@ async fn fake_models(State(f): State<Arc<Fake>>, Path(host): Path<String>) -> Js
 async fn fake_chat(State(f): State<Arc<Fake>>, Path(host): Path<String>, Json(body): Json<Value>) -> Response {
     let model = body["model"].as_str().unwrap_or("").to_string();
     f.calls.lock().unwrap().push((host.clone(), model.clone()));
+    f.efforts.lock().unwrap().push(body["reasoning_effort"].as_str().map(String::from));
     let reply = f.behaviour.lock().unwrap().get(&(host, model)).cloned().unwrap_or(Reply::Json(200, ok_body(), vec![]));
     match reply {
         Reply::Json(status, body, headers) => {
@@ -118,6 +120,8 @@ health_file: null
 tiers:
   - {{ name: smart, min_score: 80, fallback: [fast] }}
   - {{ name: fast, min_score: 0 }}
+variants:
+  - {{ name: smart-no-reason, tier: smart, reasoning_effort: none }}
 providers:
   - {{ name: a, base_url: 'http://127.0.0.1:{port}/a/v1', api_key_env: KEY_A, priority: 1 }}
   - {{ name: b, base_url: 'http://127.0.0.1:{port}/b/v1', api_key_env: KEY_B, priority: 2 }}
@@ -223,6 +227,16 @@ async fn same_model_is_merged_across_providers_and_falls_over() {
     h.chat("big-500b").await;
     let calls: Vec<(&str, &str)> = vec![("a", "org/big-500b:free"), ("b", "big-500b"), ("b", "big-500b")];
     assert_eq!(h.fake.calls(), calls.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>()); // a is cooling down
+}
+
+#[tokio::test]
+async fn variant_routes_to_its_tier_with_reasoning_off() {
+    let h = start(Fake::new(&[("a", &["big-500b", "small-1b"]), ("b", &[])]), DEFAULT_MODELS, &["secret"]).await;
+    let r = h.chat("smart-no-reason").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("x-router-model"), "big-500b");
+    assert_eq!(h.fake.efforts.lock().unwrap().clone(), vec![Some("none".to_string())]);
+    assert_eq!(h.get("/v1/models/smart-no-reason", Some("secret")).await.status, 200);
 }
 
 #[tokio::test]

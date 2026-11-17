@@ -77,7 +77,7 @@ client.chat.completions.create(model="fast", reasoning_effort="none", messages=[
 - `"minimal"`, `"low"`, `"medium"`, `"high"` non sono stati provati; su OpenRouter `low` riduce il ragionamento ma non lo toglie.
 - Senza il parametro ogni modello fa come vuole: è la scelta per i tier alti, dove il ragionamento serve.
 - Non usare l'oggetto `reasoning: {...}` di OpenRouter: Google lo rifiuta con 400. Un modello che rifiuta il valore risponde 400: il router non lo mette in pausa e prova l'endpoint dopo.
-- Non c'è ancora un default per tier in `config.yaml`.
+- Scorciatoie pronte: `smart-no-reason` e `balanced-no-reason` sono il tier `smart` / `balanced` con `reasoning_effort: "none"` già impostato dal router (sezione `variants` di `config.yaml`; sovrascrivono il valore del client).
 
 ### Errori
 

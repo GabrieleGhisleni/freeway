@@ -29,6 +29,11 @@ tiers:
   - { name: balanced, min_score: 10, fallback: [fast] }
   - { name: fast,     min_score: 0,  fallback: [] }
 
+# Shortcuts: the same tier, with reasoning_effort forced to "none" in the request.
+variants:
+  - { name: smart-no-reason,    tier: smart,    reasoning_effort: none }
+  - { name: balanced-no-reason, tier: balanced, reasoning_effort: none }
+
 providers:
   - name: openrouter
     kind: openrouter

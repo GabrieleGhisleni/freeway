@@ -69,6 +69,16 @@ pub struct TierConfig {
     pub fallback: Vec<String>,
 }
 
+/// A named shortcut for a tier plus a fixed `reasoning_effort` (e.g. `smart-no-reason`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct VariantConfig {
+    pub name: String,
+    /// The tier that answers.
+    pub tier: String,
+    /// Forced into the request body as `reasoning_effort`.
+    pub reasoning_effort: String,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModelOverride {
     #[serde(default)]
@@ -183,6 +193,9 @@ pub struct Settings {
     #[serde(default = "d_health_file")]
     pub health_file: Option<String>,
     pub tiers: Vec<TierConfig>,
+    /// Tier shortcuts with a fixed reasoning effort.
+    #[serde(default)]
+    pub variants: Vec<VariantConfig>,
     pub providers: Vec<ProviderConfig>,
     /// Canonical name -> other names that must be treated as the same model.
     #[serde(default)]
@@ -217,6 +230,14 @@ impl Settings {
                 }
             }
         }
+        for v in &self.variants {
+            if !names.contains(&v.tier.as_str()) {
+                return Err(format!("variant {:?} uses unknown tier {:?}", v.name, v.tier).into());
+            }
+            if names.contains(&v.name.as_str()) || self.variants.iter().filter(|o| o.name == v.name).count() > 1 {
+                return Err(format!("duplicate name {:?} in variants", v.name).into());
+            }
+        }
         for (key, ov) in &self.models {
             if let Some(t) = &ov.tier
                 && !names.contains(&t.as_str()) {
@@ -235,6 +256,10 @@ impl Settings {
 
     pub fn tier(&self, name: &str) -> Option<&TierConfig> {
         self.tiers.iter().find(|t| t.name == name)
+    }
+
+    pub fn variant(&self, name: &str) -> Option<&VariantConfig> {
+        self.variants.iter().find(|v| v.name == name)
     }
 
     /// The tier with the highest threshold the score reaches.
