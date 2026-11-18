@@ -5,6 +5,8 @@
 #   deploy/env.sh set KEY            read the value from the prompt (hidden) and set KEY, restart
 #   deploy/env.sh new-token          append a new random token to ROUTER_TOKENS, print it, restart
 #   deploy/env.sh keys               list the variable names set on the Pi (values hidden)
+#   deploy/env.sh named-token NAME   add a named token to ROUTER_NAMED_TOKENS (keeps the others), print it once, restart
+#   deploy/env.sh names              list the named-token names on the Pi (tokens hidden)
 #
 # Environment: DEPLOY_HOST (default rpi), DEPLOY_DIR (default freeway), as in deploy.sh.
 set -euo pipefail
@@ -37,8 +39,38 @@ case "${1:-}" in
     restart
     echo "new token (shown once): $TOKEN"
     ;;
+  named-token)
+    # Adds one name to ROUTER_NAMED_TOKENS, keeping every other name. Refuses to overwrite an existing name.
+    NAME="${2:?usage: env.sh named-token NAME}"
+    [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "invalid name (letters, digits, . _ -)" >&2; exit 2; }
+    TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+    # set -e stops here if ssh fails: an empty read must never be treated as "no names yet".
+    CUR="$(ssh "$HOST" "grep '^ROUTER_NAMED_TOKENS=' $ENVFILE || true")"
+    LINE="$(printf '%s' "$CUR" | python3 -c '
+import json, sys
+name, token = sys.argv[1], sys.argv[2]
+raw = sys.stdin.read().strip()
+body = raw.split("=", 1)[1].strip("\x27") if raw else "{}"
+data = json.loads(body)
+if name in data:
+    sys.exit("name already exists on the Pi; remove it with: deploy/env.sh edit")
+data[name] = token
+print("ROUTER_NAMED_TOKENS=\x27" + json.dumps(data, separators=(",", ":")) + "\x27")
+' "$NAME" "$TOKEN")"
+    printf '%s\n' "$LINE" | ssh "$HOST" "read -r L && f=$ENVFILE && { grep -v '^ROUTER_NAMED_TOKENS=' \$f; echo \"\$L\"; } > \$f.new && chmod 600 \$f.new && mv \$f.new \$f"
+    restart
+    echo "new named token for '$NAME' (shown once): $TOKEN"
+    ;;
+  names)
+    ssh "$HOST" "grep '^ROUTER_NAMED_TOKENS=' $ENVFILE || true" | python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+body = raw.split("=", 1)[1].strip("\x27") if raw else "{}"
+print("\n".join(json.loads(body)) or "(no named tokens)")
+'
+    ;;
   *)
-    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

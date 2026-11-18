@@ -56,6 +56,16 @@ Il client invia solo il token, come prima. Nomi e token devono essere non vuoti 
 Per dare un nome a un token esistente, copialo nella mappa; l'hash e lo storico restano gli stessi.
 Le modifiche richiedono un riavvio. I token usati senza nome compaiono come `unnamed`; senza autenticazione compare `anonymous`.
 
+**Sul Pi (produzione) si aggiunge un token con nome solo così** — non a mano, né copiando la riga da un file all'altro:
+
+```bash
+deploy/env.sh named-token nome-app   # genera il token, lo aggiunge mantenendo gli altri nomi, lo stampa una volta e riavvia
+deploy/env.sh names                  # elenca i nomi presenti sul Pi (token nascosti)
+```
+
+`named-token` rifiuta un nome già esistente invece di sovrascriverlo. Per modificare o rimuovere un nome: `deploy/env.sh edit`.
+Il `.env` del PC serve solo per le prove in locale; il Pi legge il suo `.env`, quindi un token aggiunto solo in locale non funziona in produzione.
+
 `GET /admin/usage`, con la stessa autenticazione degli altri endpoint, restituisce `data`: consumi aggregati
 per hash del token (`key_id`), nome, provider e modello upstream. Include `requests`, `completed`,
 `prompt_tokens`, `completion_tokens`, `unknown_prompt_requests` e `unknown_completion_requests`.
@@ -89,7 +99,7 @@ Il JSON resta intatto e non viene più aggiornato; i refresh successivi sostitui
 ```bash
 deploy/deploy.sh                  # test + build aarch64 (Docker) + upload + restart sul Pi
 deploy/deploy.sh --no-build       # riusa l'ultima build; altre opzioni: --skip-tests, --force
-deploy/env.sh set GEMINI_API_KEY  # chiavi e token: solo sul Pi, mai da git (anche: keys, new-token, edit)
+deploy/env.sh set GEMINI_API_KEY  # chiavi e token: solo sul Pi, mai da git (anche: keys, new-token, named-token NOME, names, edit)
 ```
 
 `deploy.sh` compila sul PC e carica sul Pi solo il binario e `config.yaml`; il `.env` non lo tocca. Rifiuta di partire se non sei su `main` o se ci sono modifiche non committate.
