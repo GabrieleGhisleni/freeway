@@ -1,0 +1,15 @@
+# Oneshot run by freeway-update.timer: install the latest GitHub release if there is one.
+# Needs passwordless sudo for `systemctl restart freeway`. Edit User/paths if the Pi user is not ggabry.
+[Unit]
+Description=freeway: install the latest GitHub release
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ggabry
+Environment=FREEWAY_DIR=/home/ggabry/freeway
+ExecStart=/home/ggabry/freeway/update.sh
+Nice=15
+IOSchedulingClass=idle
+MemoryMax=100M

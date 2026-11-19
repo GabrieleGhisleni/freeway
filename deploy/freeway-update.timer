@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for a new freeway release every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+RandomizedDelaySec=15
+
+[Install]
+WantedBy=timers.target

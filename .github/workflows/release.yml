@@ -1,0 +1,53 @@
+# On every push to main that changes the server: test, cross-compile for the Pi (aarch64),
+# publish a GitHub release with the binary + config.yaml. The Pi polls for the latest release
+# (deploy/pi-update.sh, run by deploy/freeway-update.timer) and installs it. No secrets needed.
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths: ["rust/**", "config.yaml", "deploy/build-aarch64.sh", ".github/workflows/release.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Test
+        run: cargo test --quiet --locked --manifest-path rust/Cargo.toml
+
+      - name: Build for the Pi (aarch64)
+        run: deploy/build-aarch64.sh
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp rust/target/aarch64-unknown-linux-gnu/release/freeway dist/freeway
+          cp config.yaml dist/config.yaml
+          tar -czf freeway-aarch64.tar.gz -C dist freeway config.yaml
+          sha256sum freeway-aarch64.tar.gz > freeway-aarch64.tar.gz.sha256
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="r$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}"
+          gh release create "$TAG" freeway-aarch64.tar.gz freeway-aarch64.tar.gz.sha256 \
+            --target "$GITHUB_SHA" --title "$TAG" --notes "Built from $GITHUB_SHA" --latest
+          # keep only the 5 most recent releases (and their tags)
+          gh release list --limit 100 --json tagName --jq '.[5:][].tagName' \
+            | xargs -r -n1 gh release delete --cleanup-tag --yes

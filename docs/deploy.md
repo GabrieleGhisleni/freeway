@@ -2,7 +2,7 @@
 
 Il binario Rust si compila **sul PC** (Docker) e si carica sul Pi: sul Pi non serve Rust né Docker.
 Il server ascolta solo su `127.0.0.1`; a esporlo su internet ci pensa un Cloudflare Tunnel, cioè una connessione **in uscita** dal Pi (nessuna porta da aprire sul router).
-Il deploy è uno script lanciato a mano dal PC: niente CI, niente hook git.
+Il deploy si può fare a mano dal PC (`deploy/deploy.sh`) oppure in automatico: GitHub Actions compila e pubblica una release, il Pi la scarica da solo (vedi *Aggiornamento automatico*).
 
 ```
 client ──HTTPS──> Cloudflare ──tunnel──> cloudflared (Pi) ──> freeway 127.0.0.1:4100
@@ -87,7 +87,22 @@ curl -i -H "Authorization: Bearer $TOKEN" https://freeway.tuodominio.com/health 
 
 Il dominio in uso è `freeway.gabrieleghisleni.dev` e il tunnel si chiama `freeway`. Come chiamare il servizio: [uso.md](uso.md).
 
-## Aggiornare
+## Aggiornamento automatico (release + timer sul Pi)
+
+A ogni push su `main` che tocca `rust/`, `config.yaml` o la build, [release.yml](../.github/workflows/release.yml) esegue i test, compila per aarch64 e pubblica una release GitHub (`freeway-aarch64.tar.gz` + `.sha256`; si tengono le ultime 5). Non servono segreti né accessi al Pi.
+Sul Pi, `freeway-update.timer` lancia ogni 2 minuti [pi-update.sh](../deploy/pi-update.sh): una richiesta HEAD a github.com per sapere l'ultima release; se è nuova la scarica in una cartella temporanea, controlla lo sha256, sostituisce `freeway` e `config.yaml`, riavvia e prova `/health`. Se non risponde entro 60 s rimette i file precedenti e non riprova quella release (`~/freeway/RELEASE_FAILED`). Un solo aggiornamento alla volta (`flock`), priorità bassa, nessun riavvio se la versione non cambia. `.env` e `data/` non si toccano.
+
+Installazione, una volta sola (dal PC):
+
+```bash
+scp deploy/pi-update.sh rpi:freeway/update.sh
+scp deploy/freeway-update.service deploy/freeway-update.timer rpi:/tmp/
+ssh rpi 'chmod 755 ~/freeway/update.sh && sudo cp /tmp/freeway-update.* /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now freeway-update.timer'
+```
+
+Controllo: `ssh rpi 'cat freeway/RELEASE; journalctl -u freeway-update -n 20'`. Per fermare gli aggiornamenti: `sudo systemctl disable --now freeway-update.timer`. `deploy.sh` resta valido per un deploy immediato (poi `RELEASE` e `VERSION` possono differire: il timer reinstalla l'ultima release solo se cambia).
+
+## Aggiornare a mano
 
 ```bash
 deploy/deploy.sh
