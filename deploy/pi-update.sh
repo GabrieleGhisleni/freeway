@@ -38,7 +38,7 @@ sudo -n systemctl restart freeway
 
 healthy() {
   local code
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 120); do
     code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4100/health || true)
     [[ "$code" == 401 || "$code" == 200 ]] && return 0
     sleep 1

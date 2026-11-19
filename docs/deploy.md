@@ -90,7 +90,7 @@ Il dominio in uso è `freeway.gabrieleghisleni.dev` e il tunnel si chiama `freew
 ## Aggiornamento automatico (release + timer sul Pi)
 
 A ogni push su `main` che tocca `rust/`, `config.yaml` o la build, [release.yml](../.github/workflows/release.yml) esegue i test, compila per aarch64 e pubblica una release GitHub (`freeway-aarch64.tar.gz` + `.sha256`; si tengono le ultime 5). Non servono segreti né accessi al Pi.
-Sul Pi, `freeway-update.timer` lancia ogni 2 minuti [pi-update.sh](../deploy/pi-update.sh): una richiesta HEAD a github.com per sapere l'ultima release; se è nuova la scarica in una cartella temporanea, controlla lo sha256, sostituisce `freeway` e `config.yaml`, riavvia e prova `/health`. Se non risponde entro 60 s rimette i file precedenti e non riprova quella release (`~/freeway/RELEASE_FAILED`). Un solo aggiornamento alla volta (`flock`), priorità bassa, nessun riavvio se la versione non cambia. `.env` e `data/` non si toccano.
+Sul Pi, `freeway-update.timer` lancia ogni 2 minuti [pi-update.sh](../deploy/pi-update.sh): una richiesta HEAD a github.com per sapere l'ultima release; se è nuova la scarica in una cartella temporanea, controlla lo sha256, sostituisce `freeway` e `config.yaml`, riavvia e prova `/health`. Se non risponde entro 120 s rimette i file precedenti e non riprova quella release (`~/freeway/RELEASE_FAILED`). Un solo aggiornamento alla volta (`flock`), priorità bassa, nessun riavvio se la versione non cambia. `.env` e `data/` non si toccano.
 
 Installazione, una volta sola (dal PC):
 
