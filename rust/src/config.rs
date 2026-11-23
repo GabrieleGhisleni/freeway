@@ -158,6 +158,9 @@ fn d_session() -> f64 {
 fn d_health_file() -> Option<String> {
     Some("data/health.json".into())
 }
+fn d_capabilities_file() -> Option<String> {
+    Some("data/capabilities.json".into())
+}
 fn d_scores() -> Option<ScoresConfig> {
     Some(ScoresConfig::default())
 }
@@ -192,6 +195,9 @@ pub struct Settings {
     /// Cooldowns and counters survive restarts here; null = memory only.
     #[serde(default = "d_health_file")]
     pub health_file: Option<String>,
+    /// What each endpoint accepts for `reasoning_effort`, learned from its errors; null = memory only.
+    #[serde(default = "d_capabilities_file")]
+    pub capabilities_file: Option<String>,
     pub tiers: Vec<TierConfig>,
     /// Tier shortcuts with a fixed reasoning effort.
     #[serde(default)]

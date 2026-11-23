@@ -1,5 +1,6 @@
 //! Picking which provider endpoints to try for a request, and trying them in order.
 
+use crate::caps::Capabilities;
 use crate::catalog::{Catalog, Endpoint, Model};
 use crate::config::Settings;
 use crate::health::{FailKind, Health};
@@ -229,6 +230,7 @@ pub struct Router {
     settings: Arc<Settings>,
     catalog: Arc<Catalog>,
     health: Arc<Health>,
+    caps: Capabilities,
     client: reqwest::Client,
     /// session id -> (model name, expiry)
     sessions: Mutex<HashMap<String, (String, f64)>>,
@@ -236,8 +238,13 @@ pub struct Router {
 
 impl Router {
     pub fn new(settings: Arc<Settings>, catalog: Arc<Catalog>, health: Arc<Health>, client: reqwest::Client) -> Self {
-        Self { settings, catalog, health, client, sessions: Mutex::new(HashMap::new()),
+        let caps = settings.capabilities_file.as_deref().map_or_else(Capabilities::new, Capabilities::with_file);
+        Self { settings, catalog, health, caps, client, sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.caps
     }
 
     // ---- choosing -------------------------------------------------------
@@ -500,6 +507,14 @@ impl Router {
         }))
     }
 
+    async fn send(&self, cand: &Candidate, body: &Value, stream: bool) -> Result<SuccessBody, UpstreamFailure> {
+        if stream {
+            self.call_stream(cand, body).await.map(SuccessBody::Stream)
+        } else {
+            self.call_json(cand, body).await.map(SuccessBody::Json)
+        }
+    }
+
     pub async fn complete(&self, mut body: Value, fallback: &str, session: Option<&str>) -> Result<Success, CompleteError> {
         let mut requested = body["model"].as_str().unwrap_or("").to_string();
         if let Some(v) = self.settings.variant(&requested) {
@@ -519,12 +534,19 @@ impl Router {
                 continue; // paused earlier in this very request (provider-wide limit)
             }
             let started = Instant::now();
-            body["model"] = json!(ep.raw_id);
-            let result = if stream {
-                self.call_stream(cand, &body).await.map(SuccessBody::Stream)
-            } else {
-                self.call_json(cand, &body).await.map(SuccessBody::Json)
+            // Per-attempt copy: what one endpoint needs (model id, reasoning_effort) must not leak into the next.
+            let mut attempt = body.clone();
+            attempt["model"] = json!(ep.raw_id);
+            self.caps.apply(&ep.provider, &ep.raw_id, &mut attempt);
+            let mut result = self.send(cand, &attempt, stream).await;
+            let relearn = match &result {
+                Err(f) if f.kind == FailKind::BadRequest => self.caps.learn_from(&ep.provider, &ep.raw_id, &f.message),
+                _ => false,
             };
+            if relearn && self.caps.apply(&ep.provider, &ep.raw_id, &mut attempt) {
+                tracing::info!("{} rejected reasoning_effort: learned the rule, retrying once ({:?})", ep.reference(), self.caps.get(&ep.provider, &ep.raw_id));
+                result = self.send(cand, &attempt, stream).await;
+            }
             match result {
                 Err(f) => {
                     let cooldown = self.health.fail(&ep.provider, &ep.raw_id, f.kind, &f.message, f.retry_after);

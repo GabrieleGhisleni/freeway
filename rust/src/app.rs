@@ -278,6 +278,7 @@ async fn info(State(st): State<AppState>) -> Json<Value> {
                 "last_error": s.last_error,
                 "last_latency": s.last_latency,
                 "cooldown_seconds": st.health.cooldown(&e.provider, &e.raw_id).round() as i64,
+                "reasoning_effort": st.router.capabilities().get(&e.provider, &e.raw_id),
             }));
         }
     }

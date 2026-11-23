@@ -240,6 +240,25 @@ async fn variant_routes_to_its_tier_with_reasoning_off() {
 }
 
 #[tokio::test]
+async fn a_400_about_reasoning_effort_is_learned_and_retried_without_leaking_to_the_next_endpoint() {
+    let fake = Fake::new(&[("a", &["big-500b", "small-1b"]), ("b", &[])]).on(
+        "a",
+        "big-500b",
+        Reply::Json(400, json!({ "error": { "message": "`reasoning_effort` is not supported with this model" } }), vec![]),
+    );
+    let h = start(fake, DEFAULT_MODELS, &["secret"]).await;
+    let r = h.chat("smart-no-reason").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("x-router-model"), "small-1b");
+    // big-500b: asked with "none", retried without it; small-1b still gets "none".
+    assert_eq!(h.fake.efforts.lock().unwrap().clone(), vec![Some("none".to_string()), None, Some("none".to_string())]);
+    // Learned: the next request goes to big-500b without the parameter at once.
+    h.fake.efforts.lock().unwrap().clear();
+    let _ = h.chat("smart-no-reason").await;
+    assert_eq!(h.fake.efforts.lock().unwrap().first().cloned(), Some(None));
+}
+
+#[tokio::test]
 async fn tier_falls_through_to_lower_tier() {
     let fake = Fake::new(&[("a", &["big-500b", "small-1b"]), ("b", &[])])
         .on("a", "big-500b", Reply::Json(503, json!({ "error": "down" }), vec![]));

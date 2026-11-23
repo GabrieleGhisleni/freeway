@@ -43,6 +43,7 @@ providers:
     exclude: ["openrouter/free"]   # meta-router: the real model is unknown
 
   - name: opencode
+    enabled: false                 # off for now: the free quota is exhausted (429 "Free usage limit reached")
     kind: opencode
     base_url: https://opencode.ai/zen/v1
     api_key_env: OPENCODE_API_KEY

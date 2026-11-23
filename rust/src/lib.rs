@@ -1,4 +1,5 @@
 pub mod app;
+pub mod caps;
 pub mod catalog;
 pub mod config;
 pub mod fake;
