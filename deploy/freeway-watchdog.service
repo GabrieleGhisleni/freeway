@@ -1,0 +1,12 @@
+# Oneshot run by freeway-watchdog.timer. Runs as root: it restarts freeway and cloudflared.
+# Install on the Pi:
+#   sudo install -m 755 deploy/freeway-watchdog.sh /usr/local/bin/freeway-watchdog
+#   sudo cp deploy/freeway-watchdog.service deploy/freeway-watchdog.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now freeway-watchdog.timer
+[Unit]
+Description=freeway watchdog: restart freeway or cloudflared when they stop answering
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/freeway-watchdog
+Nice=10
