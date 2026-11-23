@@ -98,6 +98,26 @@ impl UpstreamFailure {
     }
 }
 
+/// Gemini 3 wants the `thought_signature` it issued echoed back on every assistant tool call, and OpenAI-style
+/// clients drop it (it travels in the non-standard `extra_content`); history produced by another provider never
+/// had one. Google documents a placeholder that skips the check, so fill in only the ones that are missing.
+const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
+
+pub fn fill_thought_signatures(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else { return };
+    for call in messages
+        .iter_mut()
+        .filter(|m| m["role"] == "assistant")
+        .filter_map(|m| m.get_mut("tool_calls").and_then(Value::as_array_mut))
+        .flatten()
+    {
+        let has = call.pointer("/extra_content/google/thought_signature").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+        if !has && let Some(obj) = call.as_object_mut() {
+            obj.insert("extra_content".into(), json!({ "google": { "thought_signature": SKIP_THOUGHT_SIGNATURE } }));
+        }
+    }
+}
+
 pub fn classify(status: u16) -> FailKind {
     match status {
         429 => FailKind::RateLimit,
@@ -538,6 +558,9 @@ impl Router {
             let mut attempt = body.clone();
             attempt["model"] = json!(ep.raw_id);
             self.caps.apply(&ep.provider, &ep.raw_id, &mut attempt);
+            if ep.base_url.contains("generativelanguage.googleapis.com") {
+                fill_thought_signatures(&mut attempt);
+            }
             let mut result = self.send(cand, &attempt, stream).await;
             let relearn = match &result {
                 Err(f) if f.kind == FailKind::BadRequest => self.caps.learn_from(&ep.provider, &ep.raw_id, &f.message),
@@ -623,6 +646,21 @@ mod tests {
         assert_eq!(classify(408), FailKind::Server);
         assert_eq!(classify(400), FailKind::BadRequest);
         assert_eq!(classify(422), FailKind::BadRequest);
+    }
+
+    #[test]
+    fn missing_thought_signatures_are_filled_and_real_ones_kept() {
+        let mut b = json!({ "messages": [
+            { "role": "user", "content": "hi" },
+            { "role": "assistant", "tool_calls": [
+                { "id": "a", "type": "function", "function": { "name": "f", "arguments": "{}" } },
+                { "id": "b", "type": "function", "extra_content": { "google": { "thought_signature": "REAL" } }, "function": { "name": "g", "arguments": "{}" } } ] },
+            { "role": "tool", "tool_call_id": "a", "content": "x" } ] });
+        fill_thought_signatures(&mut b);
+        assert_eq!(b["messages"][1]["tool_calls"][0]["extra_content"]["google"]["thought_signature"], SKIP_THOUGHT_SIGNATURE);
+        assert_eq!(b["messages"][1]["tool_calls"][1]["extra_content"]["google"]["thought_signature"], "REAL");
+        assert!(b["messages"][0].get("tool_calls").is_none());
+        fill_thought_signatures(&mut json!({ "model": "m" })); // no messages: no panic
     }
 
     #[test]

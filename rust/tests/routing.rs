@@ -117,6 +117,7 @@ async fn start(fake: Fake, models_yaml: &str, tokens: &[&str]) -> Harness {
         "database_file: ':memory:'
 scores: null
 health_file: null
+capabilities_file: null
 tiers:
   - {{ name: smart, min_score: 80, fallback: [fast] }}
   - {{ name: fast, min_score: 0 }}
@@ -652,6 +653,7 @@ async fn probe_keeps_only_listed_models_that_answer_a_chat() {
         "database_file: ':memory:'
 scores: null
 health_file: null
+capabilities_file: null
 tiers: [{{ name: fast, min_score: 0 }}]
 providers:
   - {{ name: a, base_url: 'http://127.0.0.1:{port}/a/v1', api_key_env: KEY_A, probe: true }}
